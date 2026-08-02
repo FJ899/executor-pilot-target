@@ -1,0 +1,14 @@
+{
+  "projects": [
+    {
+      "project_id": "B",
+      "name": "Żuraw",
+      "status": "PAUSED"
+    },
+    {
+      "project_id": "A",
+      "name": "Łąka",
+      "status": "ACTIVE"
+    }
+  ]
+}

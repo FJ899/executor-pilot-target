@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "executor-pilot-target"
+version = "0.1.0"
+description = "Deterministic training target for the Creative OS Executor"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+project-registry = "project_registry.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["project_registry*"]
