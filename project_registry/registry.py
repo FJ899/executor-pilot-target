@@ -85,10 +85,7 @@ class ProjectRegistry:
         return changed
 
     def to_payload(self) -> dict[str, list[dict[str, str]]]:
-        ordered = [
-            self._projects[project_id].to_mapping()
-            for project_id in sorted(self._projects)
-        ]
+        ordered = [project.to_mapping() for project in self._projects.values()]
         return {"projects": ordered}
 
     def to_json(self) -> str:
