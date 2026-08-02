@@ -67,14 +67,6 @@ class ProjectRegistry:
             raise RegistryError(f"unknown project status: {new_status}") from exc
 
         reason = reopen_reason.strip() if reopen_reason else None
-        if (
-            project.status is ProjectStatus.CLOSED
-            and target is ProjectStatus.ACTIVE
-            and not reason
-        ):
-            raise InvalidTransitionError(
-                "CLOSED -> ACTIVE requires a non-empty reopen_reason"
-            )
 
         changed = replace(
             project,
