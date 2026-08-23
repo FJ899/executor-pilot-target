@@ -41,8 +41,9 @@ jobs:
         run: |
           set -u
           mkdir -p data/fail logs
+          rm -f /tmp/jdtls3866-classload.log
           set +e
-          JAVA_TOOL_OPTIONS='-Xlog:class+load=info' \
+          JAVA_TOOL_OPTIONS='-Xlog:class+load=info:file=/tmp/jdtls3866-classload.log' \
           JDTLS_HOME="$PWD/jdtls" \
           JDTLS_DATA_DIR="$PWD/data/fail" \
           JDTLS_WAIT_MS=30000 \
@@ -51,14 +52,14 @@ jobs:
           rc=$?
           set -e
           printf '%s\n' "$rc" > logs/fail.exit
-          grep -F 'org.eclipse.jdt.internal.core.hierarchy.HierarchyResolver source:' logs/fail.stderr || true
-          grep -F 'org.eclipse.jdt.internal.core.hierarchy.HierarchyResolver' logs/fail.stderr | head -20 || true
-          echo "CASE_RESULT exit=$rc stack_overflow=$(grep -c 'StackOverflowError' logs/fail.stderr || true) hierarchy_classload=$(grep -c 'HierarchyResolver source:' logs/fail.stderr || true)"
+          cp /tmp/jdtls3866-classload.log logs/classload.log
+          grep -F 'org.eclipse.jdt.internal.core.hierarchy.HierarchyResolver source:' logs/classload.log || true
+          echo "CASE_RESULT exit=$rc stack_overflow=$(grep -c 'StackOverflowError' logs/fail.stderr || true) hierarchy_classload=$(grep -c 'HierarchyResolver source:' logs/classload.log || true)"
 
       - name: Verify class-load trace evidence
         shell: bash
         run: |
           set -euo pipefail
           grep -q 'StackOverflowError' logs/fail.stderr
-          grep -q 'HierarchyResolver source:' logs/fail.stderr
+          grep -q 'HierarchyResolver source:' logs/classload.log
           echo 'JDTLS_3866_CLASSLOAD_TRACE=PASS'
