@@ -1,0 +1,294 @@
+name: JDTLS-3866 lookup trace
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-lookup-trace.yml
+
+permissions:
+  contents: read
+
+jobs:
+  lookup-trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch frozen reproducer and bind exact compiler.batch source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
+
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+
+          EXPECTED="$(tr -d '[:space:]' < jdtls.sha256)"
+          ACTUAL="$(sha256sum jdtls.tar.gz | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED"
+
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+
+          BATCH_JAR="$(
+            find jdtls/plugins -maxdepth 1 -type f \
+              -name 'org.eclipse.jdt.core.compiler.batch_*.jar' | head -1
+          )"
+
+          test -n "$BATCH_JAR"
+          echo "BATCH_JAR=$BATCH_JAR" >> "$GITHUB_ENV"
+          echo "batch_jar=$BATCH_JAR"
+
+          unzip -p "$BATCH_JAR" META-INF/MANIFEST.MF |
+            tr -d '\r' > batch-manifest.raw
+
+          awk '
+            BEGIN { first=1 }
+            /^[^ ]/ {
+              if (!first) printf "\n"
+              printf "%s", $0
+              first=0
+              next
+            }
+            /^ / {
+              sub(/^ /, "")
+              printf "%s", $0
+            }
+            END { printf "\n" }
+          ' batch-manifest.raw > batch-manifest.txt
+
+          SRC_LINE="$(
+            grep '^Eclipse-SourceReferences:' batch-manifest.txt || true
+          )"
+
+          test -n "$SRC_LINE"
+
+          BATCH_COMMIT="$(
+            printf '%s\n' "$SRC_LINE" |
+              sed -n 's/.*commitId=\([^;]*\).*/\1/p' |
+              tr -d '"[:space:]'
+          )"
+
+          [[ "$BATCH_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+
+          echo "JDT_BATCH_COMMIT=$BATCH_COMMIT" >> "$GITHUB_ENV"
+          echo "jdt_batch_commit=$BATCH_COMMIT"
+
+      - name: Fetch exact JDT Core source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone https://github.com/eclipse-jdt/eclipse.jdt.core.git jdt-core
+          git -C jdt-core checkout --detach "$JDT_BATCH_COMMIT"
+
+          test "$(git -C jdt-core rev-parse HEAD)" = "$JDT_BATCH_COMMIT"
+
+          SRC="jdt-core/org.eclipse.jdt.core.compiler.batch/src/org/eclipse/jdt/internal/compiler/lookup/LookupEnvironment.java"
+          test -f "$SRC"
+
+          echo "LOOKUP_SRC=$SRC" >> "$GITHUB_ENV"
+
+      - name: Inject observational compilation-unit lookup trace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp "$LOOKUP_SRC" LookupEnvironment.original.java
+
+          python3 - "$LOOKUP_SRC" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          # Add only an observational sequence counter.
+          field_match = re.search(
+              r'(?m)^([ \t]*public ITypeRequestor typeRequestor;[^\n]*\n)',
+              text
+          )
+
+          if not field_match:
+              raise SystemExit("ITypeRequestor field anchor not found")
+
+          field = (
+              "\tprivate static final java.util.concurrent.atomic.AtomicInteger "
+              "jdtls3866LookupTraceSeq = "
+              "new java.util.concurrent.atomic.AtomicInteger();\n"
+          )
+
+          text = (
+              text[:field_match.end()]
+              + field
+              + text[field_match.end():]
+          )
+
+          # Instrument exactly the compilation-unit path immediately before
+          # LookupEnvironment delegates to ITypeRequestor.accept(...).
+          call_re = re.compile(
+              r'(?m)^(?P<indent>[ \t]*)'
+              r'this\.typeRequestor\.accept'
+              r'\(answer\.getCompilationUnit\(\), '
+              r'answer\.getAccessRestriction\(\)\);$'
+          )
+
+          matches = list(call_re.finditer(text))
+
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"expected exactly one compilation-unit accept call, found {len(matches)}"
+              )
+
+          m = matches[0]
+          i = m.group("indent")
+
+          block = (
+              f"{i}org.eclipse.jdt.internal.compiler.env.ICompilationUnit "
+              f"jdtls3866Unit = answer.getCompilationUnit();\n"
+              f"{i}int jdtls3866Seq = "
+              f"jdtls3866LookupTraceSeq.incrementAndGet();\n"
+              f"{i}if (jdtls3866Seq <= 120) {{\n"
+              f"{i}\ttry {{\n"
+              f"{i}\t\tThread jdtls3866Thread = Thread.currentThread();\n"
+              f"{i}\t\tString jdtls3866Package = "
+              f"packageBinding == null ? \"<null>\" : "
+              f"CharOperation.toString(packageBinding.compoundName);\n"
+              f"{i}\t\tString jdtls3866ClientModule = "
+              f"clientModule == null || clientModule.moduleName == null "
+              f"? \"<null>\" : new String(clientModule.moduleName);\n"
+              f"{i}\t\tString jdtls3866AnswerModule = "
+              f"answer.moduleBinding == null || "
+              f"answer.moduleBinding.moduleName == null "
+              f"? \"<null>\" : new String(answer.moduleBinding.moduleName);\n"
+              f"{i}\t\tString jdtls3866File = "
+              f"jdtls3866Unit == null ? \"<null>\" : "
+              f"new String(jdtls3866Unit.getFileName());\n"
+              f"{i}\t\tString jdtls3866SourceClass = "
+              f"jdtls3866Unit == null ? \"<null>\" : "
+              f"jdtls3866Unit.getClass().getName();\n"
+              f"{i}\t\tString jdtls3866RequestorClass = "
+              f"this.typeRequestor == null ? \"<null>\" : "
+              f"this.typeRequestor.getClass().getName();\n"
+              f"{i}\t\tString jdtls3866Sought = "
+              f"name == null ? \"<null>\" : new String(name);\n"
+              f"{i}\t\tString jdtls3866Row = "
+              f"\"LOOKUP_CU seq=\" + jdtls3866Seq\n"
+              f"{i}\t\t\t+ \" threadId=\" + jdtls3866Thread.getId()\n"
+              f"{i}\t\t\t+ \" thread=\" + jdtls3866Thread.getName()\n"
+              f"{i}\t\t\t+ \" lookupEnv=\" + System.identityHashCode(this)\n"
+              f"{i}\t\t\t+ \" requestor=\" + "
+              f"System.identityHashCode(this.typeRequestor)\n"
+              f"{i}\t\t\t+ \" requestorClass=\" + jdtls3866RequestorClass\n"
+              f"{i}\t\t\t+ \" sourceUnit=\" + "
+              f"System.identityHashCode(jdtls3866Unit)\n"
+              f"{i}\t\t\t+ \" sourceClass=\" + jdtls3866SourceClass\n"
+              f"{i}\t\t\t+ \" file=\" + jdtls3866File\n"
+              f"{i}\t\t\t+ \" sought=\" + jdtls3866Sought\n"
+              f"{i}\t\t\t+ \" package=\" + jdtls3866Package\n"
+              f"{i}\t\t\t+ \" clientModule=\" + jdtls3866ClientModule\n"
+              f"{i}\t\t\t+ \" answerModule=\" + jdtls3866AnswerModule\n"
+              f"{i}\t\t\t+ \" step=\" + this.stepCompleted\n"
+              f"{i}\t\t\t+ System.lineSeparator();\n"
+              f"{i}\t\tjava.nio.file.Files.writeString(\n"
+              f"{i}\t\t\tjava.nio.file.Path.of(\n"
+              f"{i}\t\t\t\tSystem.getProperty(\"java.io.tmpdir\"),\n"
+              f"{i}\t\t\t\t\"jdtls3866-lookup-trace.log\"),\n"
+              f"{i}\t\t\tjdtls3866Row,\n"
+              f"{i}\t\t\tjava.nio.file.StandardOpenOption.CREATE,\n"
+              f"{i}\t\t\tjava.nio.file.StandardOpenOption.APPEND);\n"
+              f"{i}\t}} catch (Throwable ignored) {{\n"
+              f"{i}\t}}\n"
+              f"{i}}}\n"
+              f"{i}this.typeRequestor.accept("
+              f"jdtls3866Unit, answer.getAccessRestriction());"
+          )
+
+          text = text[:m.start()] + block + text[m.end():]
+          path.write_text(text)
+          PY
+
+          git diff --no-index -- \
+            LookupEnvironment.original.java \
+            "$LOOKUP_SRC" || true
+
+      - name: Compile only patched LookupEnvironment into compiler.batch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CP="$(printf '%s:' jdtls/plugins/*.jar)"
+          mkdir patch-classes
+
+          javac \
+            -cp "$CP" \
+            -sourcepath '' \
+            -d patch-classes \
+            "$LOOKUP_SRC"
+
+          PATCHED="patch-classes/org/eclipse/jdt/internal/compiler/lookup/LookupEnvironment.class"
+          test -f "$PATCHED"
+          jar uf "$BATCH_JAR" -C patch-classes org/eclipse/jdt/internal/compiler/lookup
+
+      - name: Run frozen FAIL and PASS controls without changing behavior
+        shell: bash
+        run: |
+          set -u
+          mkdir -p logs data
+          run_case() {
+            name="$1"; workspace="$2"; file="$3"
+            rm -rf "data/$name"; mkdir -p "data/$name"
+            set +e
+            JDTLS_HOME="$PWD/jdtls" JDTLS_DATA_DIR="$PWD/data/$name" JDTLS_WAIT_MS=30000 \
+              timeout 75s node repro/jdtls-calls.mjs "$workspace" "$file" 5 8 \
+              >"logs/$name.stdout" 2>"logs/$name.stderr"
+            rc=$?
+            set -e
+            printf '%s\n' "$rc" >"logs/$name.exit"
+            cat "logs/$name.stdout"
+            cat "logs/$name.stderr" >&2
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) trace=$(grep -c 'LOOKUP_CU' "logs/$name.stderr" || true)"
+          }
+          set -e
+          run_case fail repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case pass-no-module repro/pass-no-module repro/pass-no-module/src/main/java/foo/Foo.java
+          run_case pass-no-self-reference-import repro/pass-no-self-reference-import repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
+          run_case pass-separate-test-pkg repro/pass-separate-test-pkg repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
+
+      - name: Verify observational trace contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'StackOverflowError' logs/fail.stderr
+          grep -q 'LOOKUP_CU' logs/fail.stderr
+          for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+            ! grep -q 'StackOverflowError' "logs/$name.stderr"
+            grep -q '^Outgoing calls:' "logs/$name.stdout"
+          done
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          for name in ['fail','pass-no-module','pass-no-self-reference-import','pass-separate-test-pkg']:
+              text = Path(f'logs/{name}.stderr').read_text(errors='replace')
+              rows = [line for line in text.splitlines() if 'LOOKUP_CU' in line]
+              print(f'TRACE_SUMMARY case={name} rows={len(rows)}')
+              for line in rows[:30]:
+                  print(line)
+          PY
+          echo 'JDTLS_3866_LOOKUP_TRACE=PASS'
