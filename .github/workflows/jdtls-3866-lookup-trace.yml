@@ -292,6 +292,7 @@ jobs:
           run_case() {
             name="$1"; workspace="$2"; file="$3"
             rm -rf "data/$name"; mkdir -p "data/$name"
+            rm -f /tmp/jdtls3866-lookup-trace.log
             set +e
             JDTLS_HOME="$PWD/jdtls" JDTLS_DATA_DIR="$PWD/data/$name" JDTLS_WAIT_MS=30000 \
               timeout 75s node repro/jdtls-calls.mjs "$workspace" "$file" 5 8 \
@@ -299,9 +300,14 @@ jobs:
             rc=$?
             set -e
             printf '%s\n' "$rc" >"logs/$name.exit"
+            if [ -f /tmp/jdtls3866-lookup-trace.log ]; then
+              cp /tmp/jdtls3866-lookup-trace.log "logs/$name.lookup.trace"
+            else
+              : > "logs/$name.lookup.trace"
+            fi
             cat "logs/$name.stdout"
             cat "logs/$name.stderr" >&2
-            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) trace=$(grep -c 'LOOKUP_CU' "logs/$name.stderr" || true)"
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) trace=$(grep -c '^LOOKUP_CU ' "logs/$name.lookup.trace" || true)"
           }
           set -e
           run_case fail repro/fail repro/fail/src/main/java/foo/Foo.java
@@ -314,18 +320,17 @@ jobs:
         run: |
           set -euo pipefail
           grep -q 'StackOverflowError' logs/fail.stderr
-          grep -q 'LOOKUP_CU' logs/fail.stderr
+          grep -q '^LOOKUP_CU ' logs/fail.lookup.trace
           for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
             ! grep -q 'StackOverflowError' "logs/$name.stderr"
             grep -q '^Outgoing calls:' "logs/$name.stdout"
           done
 
           python3 - <<'PY'
-          import re
           from pathlib import Path
           for name in ['fail','pass-no-module','pass-no-self-reference-import','pass-separate-test-pkg']:
-              text = Path(f'logs/{name}.stderr').read_text(errors='replace')
-              rows = [line for line in text.splitlines() if 'LOOKUP_CU' in line]
+              text = Path(f'logs/{name}.lookup.trace').read_text(errors='replace')
+              rows = [line for line in text.splitlines() if line.startswith('LOOKUP_CU ')]
               print(f'TRACE_SUMMARY case={name} rows={len(rows)}')
               for line in rows[:30]:
                   print(line)
