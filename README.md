@@ -1,6 +1,6 @@
 # Executor Pilot Target
 
-Kontrolowane repozytorium szkoleniowo-testowe dla projektu `litrgratis-pixel/Executor`.
+Kontrolowane repozytorium szkoleniowo-testowe dla projektu `FJ899/Executor`.
 
 Repo służy wyłącznie do sprawdzenia pionowego przepływu Executora na małym, deterministycznym projekcie Python. Nie jest produktem, platformą ani dowodem wartości biznesowej Executora.
 
