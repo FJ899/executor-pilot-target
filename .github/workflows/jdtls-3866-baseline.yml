@@ -1,4 +1,4 @@
-name: JDTLS-3866 baseline
+name: JDTLS-3866 mechanism matrix
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  baseline:
+  mechanism-matrix:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -53,65 +53,97 @@ jobs:
           test "$ACTUAL" = "$EXPECTED"
           mkdir jdtls
           tar -xzf jdtls.tar.gz -C jdtls
-          test -d jdtls/plugins
-          ls jdtls/plugins/org.eclipse.equinox.launcher_*.jar >/dev/null
 
-      - name: Run FAIL and published PASS controls without target changes
+      - name: Prepare controlled mechanism variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p harness workspaces
+
+          python - <<'PY'
+          from pathlib import Path
+
+          src = Path('repro/jdtls-calls.mjs').read_text()
+          needle = '  await openAllDocuments();'
+          assert src.count(needle) == 1
+
+          variants = {
+              'no-open': '  // mechanism experiment: no didOpen notifications',
+              'target-only': '  await openDocument(file);',
+              'bag-only': "  await openDocument(join(workspace, 'src/main/java/foo/bar/Bag.java'));",
+              'test-only': "  await openDocument(join(workspace, 'src/test/java/foo/bar/BagTest.java'));",
+          }
+          for name, replacement in variants.items():
+              Path(f'harness/{name}.mjs').write_text(src.replace(needle, replacement))
+          PY
+
+          cp -a repro/fail workspaces/remove-test-tree
+          rm -rf workspaces/remove-test-tree/src/test
+
+          cp -a repro/fail workspaces/remove-test-file
+          rm workspaces/remove-test-file/src/test/java/foo/bar/BagTest.java
+
+      - name: Run mechanism matrix
         shell: bash
         run: |
           set -u
           mkdir -p logs data
+          : > matrix.tsv
 
           run_case() {
             name="$1"
-            workspace="$2"
-            file="$3"
+            script="$2"
+            workspace="$3"
+            file="$4"
             rm -rf "data/$name"
             mkdir -p "data/$name"
             set +e
             JDTLS_HOME="$PWD/jdtls" \
             JDTLS_DATA_DIR="$PWD/data/$name" \
             JDTLS_WAIT_MS=30000 \
-              timeout 75s node repro/jdtls-calls.mjs "$workspace" "$file" 5 8 \
+              timeout 75s node "$script" "$workspace" "$file" 5 8 \
               >"logs/$name.stdout" 2>"logs/$name.stderr"
             rc=$?
             set -e
-            printf '%s\n' "$rc" >"logs/$name.exit"
-            cat "logs/$name.stdout"
-            cat "logs/$name.stderr" >&2
-            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true)"
+            soe=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true)
+            printf '%s\t%s\t%s\n' "$name" "$rc" "$soe" >> matrix.tsv
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$soe"
           }
 
           set -e
-          run_case fail \
-            repro/fail \
-            repro/fail/src/main/java/foo/Foo.java
-          run_case pass-no-module \
-            repro/pass-no-module \
-            repro/pass-no-module/src/main/java/foo/Foo.java
-          run_case pass-no-self-reference-import \
-            repro/pass-no-self-reference-import \
-            repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
-          run_case pass-separate-test-pkg \
-            repro/pass-separate-test-pkg \
-            repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
+          run_case baseline repro/jdtls-calls.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case pass-no-module repro/jdtls-calls.mjs repro/pass-no-module repro/pass-no-module/src/main/java/foo/Foo.java
+          run_case pass-no-self-reference-import repro/jdtls-calls.mjs repro/pass-no-self-reference-import repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
+          run_case pass-separate-test-pkg repro/jdtls-calls.mjs repro/pass-separate-test-pkg repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
 
-      - name: Evaluate baseline contract
+          run_case no-open harness/no-open.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case target-only harness/target-only.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case bag-only harness/bag-only.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case test-only harness/test-only.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case remove-test-tree repro/jdtls-calls.mjs workspaces/remove-test-tree workspaces/remove-test-tree/src/main/java/foo/Foo.java
+          run_case remove-test-file repro/jdtls-calls.mjs workspaces/remove-test-file workspaces/remove-test-file/src/main/java/foo/Foo.java
+
+          echo '--- MATRIX name exit stack_overflow_count ---'
+          cat matrix.tsv
+
+      - name: Preserve baseline validity and report experiment
         shell: bash
         run: |
           set -euo pipefail
-          echo "FAIL control must contain StackOverflowError"
-          grep -q 'StackOverflowError' logs/fail.stderr
 
-          echo "Published PASS controls must not contain StackOverflowError"
+          get_soe() {
+            awk -F '\t' -v key="$1" '$1 == key { print $3 }' matrix.tsv
+          }
+
+          test "$(get_soe baseline)" -gt 0
           for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
-            if grep -q 'StackOverflowError' "logs/$name.stderr"; then
-              echo "UNEXPECTED_STACK_OVERFLOW in $name"
-              exit 1
-            fi
+            test "$(get_soe "$name")" -eq 0
           done
 
-          echo "JDTLS_3866_BASELINE=CONFIRMED"
-          echo "TARGET_CODE_CHANGED=NO"
-          echo "REPRO_SHA=57fa37e03621026b3b165075934a34677a6c92d9"
-          echo "JDTLS_SNAPSHOT=jdt-language-server-1.61.0-202607301809.tar.gz"
+          echo 'JDTLS_3866_BASELINE_STILL_VALID=YES'
+          echo 'TARGET_CODE_CHANGED=NO'
+          echo 'HYPOTHESIS_H1=TESTED_NOT_PREJUDGED'
+          echo 'Experimental cells:'
+          for name in no-open target-only bag-only test-only remove-test-tree remove-test-file; do
+            printf '%s stack_overflow=%s\n' "$name" "$(get_soe "$name")"
+          done
