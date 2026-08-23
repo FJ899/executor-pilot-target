@@ -1,0 +1,104 @@
+!SESSION 2026-08-23 08:21:58.427 -----------------------------------------------
+eclipse.buildId=unknown
+java.version=21.0.12
+java.vendor=Eclipse Adoptium
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=en
+Command-line arguments:  -data /home/runner/work/_temp/jdtls-3866-pass-separate-test-pkg
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:21:59.946
+!MESSAGE class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is started
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:00.005
+!MESSAGE Started org.eclipse.buildship.core 45ms
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:00.005
+!MESSAGE Started org.eclipse.m2e.core 0ms
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:00.217
+!MESSAGE Main thread is waiting
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:00.320
+!MESSAGE >> initialize
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:00.323
+!MESSAGE Initializing JDT Language Server (Standard)
+	- Version: 1.61.0-SNAPSHOT (OSGi 1.61.0.202608051627)
+	- Git Commit: 9d6941a - Add workspace/textDocumentContent request (#3852) (#3855)
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:01.088
+!MESSAGE ProjectRegistryRefreshJob finished 1083ms
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:01.144
+!MESSAGE Static Commands: []
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:01.144
+!MESSAGE Non-Static Commands: [java.project.import, java.project.changeImportedProjects, java.navigate.openTypeHierarchy, java.project.resolveStackTraceLocation, java.edit.handlePasteEvent, java.edit.stringFormatting, java.project.getSettings, java.project.resolveWorkspaceSymbol, java.project.upgradeGradle, java.project.createModuleInfo, java.vm.getAllInstalls, java.edit.organizeImports, java.project.refreshDiagnostics, java.getFullyQualifiedName, java.project.removeFromSourcePath, java.project.listSourcePaths, java.project.updateSettings, java.project.getAll, java.reloadBundles, java.project.isTestFile, java.project.resolveText, java.project.getClasspaths, java.navigate.resolveTypeHierarchy, java.getTroubleshootingInfo, java.edit.smartSemicolonDetection, java.project.updateSourceAttachment, java.project.updateClassPaths, java.decompile, java.protobuf.generateSources, java.project.resolveSourceAttachment, java.project.updateJdk, java.project.addToSourcePath, java.completion.onDidSelect]
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:01.168
+!MESSAGE RepositoryRegistryUpdateJob finished 0ms
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:01.183
+!MESSAGE >> initialized
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:01.185
+!MESSAGE Importers: GradleProjectImporter, MavenProjectImporter, EclipseProjectImporter, InvisibleProjectImporter
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:01.192
+!MESSAGE Importing Maven project(s)
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:02.457
+!MESSAGE Progressive import: reporting 1 new project(s)
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:02.464
+!MESSAGE Workspace initialized in 1296ms
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:02.493
+!MESSAGE >> initialization job finished
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:02.832
+!MESSAGE >> build jobs finished
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:02.833
+!MESSAGE >> registerWatchers'
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:02.986
+!MESSAGE Reconciled 4. Took 1 ms
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.674
+!MESSAGE begin problem for /Foo.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.678
+!MESSAGE 0 problems reported for /Foo.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.689
+!MESSAGE begin problem for /BagTest.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.689
+!MESSAGE 0 problems reported for /BagTest.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.702
+!MESSAGE begin problem for /Bag.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.703
+!MESSAGE 1 problems reported for /Bag.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.709
+!MESSAGE begin problem for /module-info.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.711
+!MESSAGE 0 problems reported for /module-info.java
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:03.712
+!MESSAGE Validated 4. Took 74 ms
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:06.518
+!MESSAGE >> shutdown
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:06.520
+!MESSAGE >> exit
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:06.539
+!MESSAGE Shutdown received... waking up main thread
+
+!ENTRY org.eclipse.jdt.ls.core 1 0 2026-08-23 08:22:06.546
+!MESSAGE class org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin is stopping:

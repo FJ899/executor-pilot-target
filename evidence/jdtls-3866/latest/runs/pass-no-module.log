@@ -1,0 +1,29 @@
+[jdtls] Workspace root: /home/runner/work/executor-pilot-target/executor-pilot-target/reproducer/pass-no-module
+[jdtls] Metadata directory: /home/runner/work/_temp/jdtls-3866-pass-no-module
+[jdtls] Starting: java "-Declipse.application=org.eclipse.jdt.ls.core.id1" "-Dosgi.bundles.defaultStartLevel=4" "-Declipse.product=org.eclipse.jdt.ls.core.product" "-Dlog.level=WARN" "-Xmx1G" "--add-modules=ALL-SYSTEM" "--add-opens" "java.base/java.util=ALL-UNNAMED" "--add-opens" "java.base/java.lang=ALL-UNNAMED" "-jar" "/home/runner/work/executor-pilot-target/executor-pilot-target/jdtls/plugins/org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar" "-configuration" "/home/runner/work/executor-pilot-target/executor-pilot-target/jdtls/config_linux" "-data" "/home/runner/work/_temp/jdtls-3866-pass-no-module"
+[jdtls] WARNING: Using incubator modules: jdk.incubator.vector
+[jdtls] Aug 23, 2026 8:21:40 AM org.apache.aries.spifly.BaseActivator log
+INFO: Registered provider ch.qos.logback.classic.spi.LogbackServiceProvider of service org.slf4j.spi.SLF4JServiceProvider in bundle ch.qos.logback.classic
+[jdtls status] Starting: Init...
+[jdtls status] Starting: 0% Starting Java Language Server
+[jdtls] Server capabilities: true
+[jdtls] Waiting up to 30000 ms for server readiness...
+[jdtls status] Starting: 50% Starting Java Language Server - Project 'foo'
+[jdtls status] Starting: 70% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] ProjectStatus: OK
+[jdtls status] Starting: 100% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] Starting: 1000% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] Starting: 1005% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] Starting: 1010% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] Starting: 1100% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] Starting: 1100% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] Started: Ready
+[jdtls status] Starting: 1100% Starting Java Language Server - Refreshing '/foo/src/test/java'.
+[jdtls status] ServiceReady: ServiceReady
+[jdtls] Server reported ready.
+[jdtls] Opening all Java files in workspace...
+[jdtls] Found 3 Java files
+
+Target: method() : void (6) — src/main/java/foo/Foo.java:5:3
+Outgoing calls:
+  (none)

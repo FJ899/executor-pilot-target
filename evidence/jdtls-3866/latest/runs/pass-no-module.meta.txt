@@ -1,0 +1,4 @@
+CASE=pass-no-module
+WORKSPACE=pass-no-module
+FILE=pass-no-module/src/main/java/foo/Foo.java
+DATA_DIR=/home/runner/work/_temp/jdtls-3866-pass-no-module

@@ -1,0 +1,4 @@
+CASE=pass-separate-test-pkg
+WORKSPACE=pass-separate-test-pkg
+FILE=pass-separate-test-pkg/src/main/java/foo/Foo.java
+DATA_DIR=/home/runner/work/_temp/jdtls-3866-pass-separate-test-pkg

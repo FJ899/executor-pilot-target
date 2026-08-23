@@ -1,0 +1,4 @@
+CASE=pass-no-self-reference-import
+WORKSPACE=pass-no-self-reference-import
+FILE=pass-no-self-reference-import/src/main/java/foo/Foo.java
+DATA_DIR=/home/runner/work/_temp/jdtls-3866-pass-no-self-reference-import

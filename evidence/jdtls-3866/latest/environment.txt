@@ -1,0 +1,17 @@
+activation_time_utc=2026-08-23T08:21:17Z
+workflow_commit=0dc36f5edcdd617a5e6fafb0654f06fd3dc7ca65
+runner_os=Linux
+runner_arch=X64
+runner_name=GitHub Actions 1000002486
+reproducer_repo=https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git
+reproducer_sha=57fa37e03621026b3b165075934a34677a6c92d9
+jdtls_archive=jdt-language-server-1.61.0-202608051627.tar.gz
+jdtls_url=https://download.eclipse.org/jdtls/snapshots/jdt-language-server-1.61.0-202608051627.tar.gz
+java_version_begin
+openjdk version "21.0.12" 2026-07-21 LTS
+OpenJDK Runtime Environment Temurin-21.0.12+8 (build 21.0.12+8-LTS)
+OpenJDK 64-Bit Server VM Temurin-21.0.12+8 (build 21.0.12+8-LTS, mixed mode, sharing)
+java_version_end
+node_version=v22.23.2
+git_version=git version 2.55.0
+kernel=Linux runnervm76f27 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
