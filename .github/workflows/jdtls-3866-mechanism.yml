@@ -27,7 +27,7 @@ jobs:
           git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
           test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
 
-      - name: Fetch pinned JDTLS snapshot
+      - name: Fetch pinned JDTLS snapshot and bind exact JDT Core source
         shell: bash
         run: |
           set -euo pipefail
@@ -43,12 +43,7 @@ jobs:
           CORE_JAR="$(find jdtls/plugins -maxdepth 1 -type f -name 'org.eclipse.jdt.core_*.jar' | head -1)"
           test -n "$CORE_JAR"
           echo "CORE_JAR=$CORE_JAR" >> "$GITHUB_ENV"
-          echo "core_jar=$CORE_JAR"
 
-      - name: Recover exact JDT Core source ref from bundle metadata
-        shell: bash
-        run: |
-          set -euo pipefail
           unzip -p "$CORE_JAR" META-INF/MANIFEST.MF | tr -d '\r' > core-manifest.raw
           awk '
             BEGIN { first=1 }
@@ -56,23 +51,25 @@ jobs:
             /^ / { sub(/^ /, ""); printf "%s", $0 }
             END { printf "\n" }
           ' core-manifest.raw > core-manifest.txt
-          cat core-manifest.txt
           SRC_LINE="$(grep '^Eclipse-SourceReferences:' core-manifest.txt || true)"
           test -n "$SRC_LINE"
-          SRC_REF="$(printf '%s\n' "$SRC_LINE" | sed -n 's/.*[;]tag=\([^;]*\).*/\1/p' | tr -d '"')"
-          test -n "$SRC_REF"
-          echo "JDT_CORE_REF=$SRC_REF" >> "$GITHUB_ENV"
-          echo "jdt_core_ref=$SRC_REF"
+          EXPECTED_CORE_COMMIT="83574082f7f08268c6d31d2c6d0aa7e78c192672"
+          printf '%s\n' "$SRC_LINE" | grep -q "commitId=$EXPECTED_CORE_COMMIT"
+          echo "JDT_CORE_COMMIT=$EXPECTED_CORE_COMMIT" >> "$GITHUB_ENV"
+          echo "core_jar=$CORE_JAR"
+          echo "jdt_core_commit=$EXPECTED_CORE_COMMIT"
 
-      - name: Fetch exact JDT Core source and inject diagnostic reentry guard
+      - name: Inject cross-instance diagnostic reentry guard
         shell: bash
         run: |
           set -euo pipefail
           git clone https://github.com/eclipse-jdt/eclipse.jdt.core.git jdt-core
-          git -C jdt-core checkout --detach "$JDT_CORE_REF"
+          git -C jdt-core checkout --detach "$JDT_CORE_COMMIT"
+          test "$(git -C jdt-core rev-parse HEAD)" = "$JDT_CORE_COMMIT"
           SRC="jdt-core/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
           test -f "$SRC"
           cp "$SRC" HierarchyResolver.original.java
+
           python3 - "$SRC" <<'PY'
           from pathlib import Path
           import sys
@@ -83,11 +80,11 @@ jobs:
           field_anchor = "\tprivate final BindingMap<IGenericType> bindingMap = new BindingMap<>();"
           if field_anchor not in text:
               raise SystemExit("field anchor not found")
-          text = text.replace(
-              field_anchor,
-              field_anchor + "\n\tprivate final HashSet<String> sourceUnitsBeingAccepted = new HashSet<>();",
-              1,
+          diagnostic_field = (
+              "\n\tprivate static final ThreadLocal<java.util.HashMap<String, Integer>> "
+              "sourceUnitAcceptOwners = ThreadLocal.withInitial(java.util.HashMap::new);"
           )
+          text = text.replace(field_anchor, field_anchor + diagnostic_field, 1)
 
           signature = "public void accept(ICompilationUnit sourceUnit, AccessRestriction accessRestriction)"
           sig = text.index(signature)
@@ -110,23 +107,31 @@ jobs:
           indented = "".join("\t" + line if line.strip() else line for line in original_inner.splitlines(keepends=True))
           replacement = "{\n" + (
               "\t\tString sourceUnitFile = new String(sourceUnit.getFileName());\n"
-              "\t\tif (!this.sourceUnitsBeingAccepted.add(sourceUnitFile)) {\n"
-              "\t\t\tSystem.err.println(\"JDTLS3866_REENTRANT_ACCEPT_BLOCKED file=\" + sourceUnitFile);\n"
+              "\t\tjava.util.HashMap<String, Integer> active = sourceUnitAcceptOwners.get();\n"
+              "\t\tint currentResolver = System.identityHashCode(this);\n"
+              "\t\tInteger ownerResolver = active.putIfAbsent(sourceUnitFile, currentResolver);\n"
+              "\t\tif (ownerResolver != null) {\n"
+              "\t\t\tSystem.err.println(\"JDTLS3866_CROSS_INSTANCE_REENTRY_BLOCKED file=\" + sourceUnitFile\n"
+              "\t\t\t\t\t+ \" ownerResolver=\" + ownerResolver + \" currentResolver=\" + currentResolver);\n"
               "\t\t\treturn;\n"
               "\t\t}\n"
               "\t\ttry {\n"
           ) + indented + (
               "\t\t} finally {\n"
-              "\t\t\tthis.sourceUnitsBeingAccepted.remove(sourceUnitFile);\n"
+              "\t\t\tactive.remove(sourceUnitFile);\n"
+              "\t\t\tif (active.isEmpty()) {\n"
+              "\t\t\t\tsourceUnitAcceptOwners.remove();\n"
+              "\t\t\t}\n"
               "\t\t}\n"
               "\t}"
           )
           text = text[:open_brace] + replacement + text[close_brace + 1:]
           path.write_text(text)
           PY
+
           git diff --no-index -- HierarchyResolver.original.java "$SRC" || true
 
-      - name: Compile only the patched HierarchyResolver against the pinned runtime
+      - name: Compile only patched HierarchyResolver against pinned runtime
         shell: bash
         run: |
           set -euo pipefail
@@ -134,7 +139,7 @@ jobs:
           CP="$(printf '%s:' jdtls/plugins/*.jar)"
           mkdir patch-classes
           javac -cp "$CP" -sourcepath '' -d patch-classes "$SRC"
-          find patch-classes/org/eclipse/jdt/internal/core/hierarchy -maxdepth 1 -name 'HierarchyResolver*.class' -print
+          test -f patch-classes/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.class
           jar uf "$CORE_JAR" -C patch-classes org/eclipse/jdt/internal/core/hierarchy
 
       - name: Run patched FAIL and all published PASS controls
@@ -160,7 +165,7 @@ jobs:
             printf '%s\n' "$rc" >"logs/$name.exit"
             cat "logs/$name.stdout"
             cat "logs/$name.stderr" >&2
-            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) reentry=$(grep -c 'JDTLS3866_REENTRANT_ACCEPT_BLOCKED' "logs/$name.stderr" || true)"
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) cross_instance_reentry=$(grep -c 'JDTLS3866_CROSS_INSTANCE_REENTRY_BLOCKED' "logs/$name.stderr" || true)"
           }
 
           set -e
@@ -169,24 +174,32 @@ jobs:
           run_case pass-no-self-reference-import repro/pass-no-self-reference-import repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
           run_case pass-separate-test-pkg repro/pass-separate-test-pkg repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
 
-      - name: Evaluate mechanism hypothesis
+      - name: Evaluate refined mechanism hypothesis
         shell: bash
         run: |
           set -euo pipefail
-
-          # The harness exits non-zero during its own child-process shutdown even on
-          # semantically successful controls. Classify by observable LSP result, not
-          # by the Node wrapper's process exit code.
           ! grep -q 'StackOverflowError' logs/fail.stderr
-          grep -q 'JDTLS3866_REENTRANT_ACCEPT_BLOCKED' logs/fail.stderr
+          grep -q 'JDTLS3866_CROSS_INSTANCE_REENTRY_BLOCKED' logs/fail.stderr
           grep -q '^Prepared:' logs/fail.stdout
           grep -q '^Target:' logs/fail.stdout
           grep -q '^Outgoing calls:' logs/fail.stdout
           ! grep -q 'No call hierarchy item prepared' logs/fail.stdout
 
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('logs/fail.stderr').read_text(errors='replace')
+          hits = re.findall(r'JDTLS3866_CROSS_INSTANCE_REENTRY_BLOCKED .*?ownerResolver=(\d+) currentResolver=(\d+)', text)
+          if not hits:
+              raise SystemExit('no cross-instance reentry marker')
+          if not any(owner != current for owner, current in hits):
+              raise SystemExit('reentry occurred only on same resolver instance')
+          print(f'CROSS_INSTANCE_REENTRY_PROOF hits={len(hits)} distinct_instance_hit=yes')
+          PY
+
           for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
             ! grep -q 'StackOverflowError' "logs/$name.stderr"
-            ! grep -q 'JDTLS3866_REENTRANT_ACCEPT_BLOCKED' "logs/$name.stderr"
+            ! grep -q 'JDTLS3866_CROSS_INSTANCE_REENTRY_BLOCKED' "logs/$name.stderr"
             grep -q '^Prepared:' "logs/$name.stdout"
             grep -q '^Target:' "logs/$name.stdout"
             grep -q '^Outgoing calls:' "logs/$name.stdout"
@@ -194,6 +207,6 @@ jobs:
           done
 
           echo "JDTLS_3866_MECHANISM_PROBE=PASS"
-          echo "HYPOTHESIS=REENTRANT_ICompilationUnit_ACCEPT_DURING_HIERARCHY_COMPLETION"
+          echo "HYPOTHESIS=CROSS_INSTANCE_REENTRANT_ICompilationUnit_ACCEPT_DURING_HIERARCHY_COMPLETION"
           echo "PATCH_SCOPE=DIAGNOSTIC_GUARD_ONLY"
           echo "UPSTREAM_FIX_CLAIM=NOT_YET"
