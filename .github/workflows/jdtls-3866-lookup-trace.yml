@@ -190,10 +190,23 @@ jobs:
           global_match_end = open_brace + 1 + m.end()
 
           block = (
-              f"{i}org.eclipse.jdt.internal.compiler.env.ICompilationUnit "
-              f"jdtls3866Unit = answer.getCompilationUnit();\n"
               f"{i}int jdtls3866Seq = "
               f"jdtls3866LookupTraceSeq.incrementAndGet();\n"
+              f"{i}if (jdtls3866Seq <= 120) {{\n"
+              f"{i}\ttry {{\n"
+              f"{i}\t\tjava.nio.file.Files.writeString(\n"
+              f"{i}\t\t\tjava.nio.file.Path.of(\n"
+              f"{i}\t\t\t\tSystem.getProperty(\"java.io.tmpdir\"),\n"
+              f"{i}\t\t\t\t\"jdtls3866-lookup-trace.log\"),\n"
+              f"{i}\t\t\t\"LOOKUP_CU_REACHED seq=\" + jdtls3866Seq\n"
+              f"{i}\t\t\t\t+ System.lineSeparator(),\n"
+              f"{i}\t\t\tjava.nio.file.StandardOpenOption.CREATE,\n"
+              f"{i}\t\t\tjava.nio.file.StandardOpenOption.APPEND);\n"
+              f"{i}\t}} catch (Throwable ignored) {{\n"
+              f"{i}\t}}\n"
+              f"{i}}}\n"
+              f"{i}org.eclipse.jdt.internal.compiler.env.ICompilationUnit "
+              f"jdtls3866Unit = answer.getCompilationUnit();\n"
               f"{i}if (jdtls3866Seq <= 120) {{\n"
               f"{i}\ttry {{\n"
               f"{i}\t\tThread jdtls3866Thread = Thread.currentThread();\n"
@@ -314,7 +327,7 @@ jobs:
             fi
             cat "logs/$name.stdout"
             cat "logs/$name.stderr" >&2
-            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) enter=$(grep -c '^LOOKUP_ENTER$' "logs/$name.lookup.trace" || true) trace=$(grep -c '^LOOKUP_CU ' "logs/$name.lookup.trace" || true)"
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) enter=$(grep -c '^LOOKUP_ENTER$' "logs/$name.lookup.trace" || true) reached=$(grep -c '^LOOKUP_CU_REACHED seq=' "logs/$name.lookup.trace" || true) trace=$(grep -c '^LOOKUP_CU ' "logs/$name.lookup.trace" || true)"
           }
           set -e
           run_case fail repro/fail repro/fail/src/main/java/foo/Foo.java
@@ -327,7 +340,7 @@ jobs:
         run: |
           set -euo pipefail
           grep -q 'StackOverflowError' logs/fail.stderr
-          grep -q '^LOOKUP_CU ' logs/fail.lookup.trace
+          grep -q '^LOOKUP_CU_REACHED seq=' logs/fail.lookup.trace
           for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
             ! grep -q 'StackOverflowError' "logs/$name.stderr"
             grep -q '^Outgoing calls:' "logs/$name.stdout"
@@ -337,8 +350,11 @@ jobs:
           from pathlib import Path
           for name in ['fail','pass-no-module','pass-no-self-reference-import','pass-separate-test-pkg']:
               text = Path(f'logs/{name}.lookup.trace').read_text(errors='replace')
+              reached = [line for line in text.splitlines() if line.startswith('LOOKUP_CU_REACHED seq=')]
               rows = [line for line in text.splitlines() if line.startswith('LOOKUP_CU ')]
-              print(f'TRACE_SUMMARY case={name} rows={len(rows)}')
+              print(f'TRACE_SUMMARY case={name} reached={len(reached)} rows={len(rows)}')
+              for line in reached[:30]:
+                  print(line)
               for line in rows[:30]:
                   print(line)
           PY
