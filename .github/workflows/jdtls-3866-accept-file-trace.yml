@@ -1,0 +1,156 @@
+name: JDTLS-3866 accept file trace
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-accept-file-trace.yml
+
+permissions:
+  contents: read
+
+jobs:
+  accept-file-trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch frozen reproducer, pinned JDTLS, and exact JDT Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+          test "$(sha256sum jdtls.tar.gz | awk '{print $1}')" = "$(tr -d '[:space:]' < jdtls.sha256)"
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+          CORE_JAR="$(find jdtls/plugins -maxdepth 1 -type f -name 'org.eclipse.jdt.core_*.jar' | head -1)"
+          test -n "$CORE_JAR"
+          echo "CORE_JAR=$CORE_JAR" >> "$GITHUB_ENV"
+          EXPECTED_CORE_COMMIT="83574082f7f08268c6d31d2c6d0aa7e78c192672"
+          git clone https://github.com/eclipse-jdt/eclipse.jdt.core.git jdt-core
+          git -C jdt-core checkout --detach "$EXPECTED_CORE_COMMIT"
+          test "$(git -C jdt-core rev-parse HEAD)" = "$EXPECTED_CORE_COMMIT"
+
+      - name: Inject bounded trace to temp file
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="jdt-core/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          anchor = "\tprivate final BindingMap<IGenericType> bindingMap = new BindingMap<>();"
+          fields = (
+              "\n\tprivate static final java.util.concurrent.atomic.AtomicInteger jdtls3866FileTraceSeq = new java.util.concurrent.atomic.AtomicInteger();"
+              "\n\tprivate static final ThreadLocal<Integer> jdtls3866FileTraceDepth = ThreadLocal.withInitial(() -> 0);"
+          )
+          if anchor not in text:
+              raise SystemExit("field anchor not found")
+          text = text.replace(anchor, anchor + fields, 1)
+
+          signature = "public void accept(ICompilationUnit sourceUnit, AccessRestriction accessRestriction)"
+          sig = text.index(signature)
+          open_brace = text.index("{", sig)
+          depth = 0
+          close_brace = None
+          for i in range(open_brace, len(text)):
+              if text[i] == "{": depth += 1
+              elif text[i] == "}":
+                  depth -= 1
+                  if depth == 0:
+                      close_brace = i
+                      break
+          if close_brace is None:
+              raise SystemExit("method closing brace not found")
+
+          inner = text[open_brace + 1:close_brace]
+          indented = "".join("\t" + line if line.strip() else line for line in inner.splitlines(keepends=True))
+          prefix = (
+              "{\n"
+              "\t\tint traceDepth = jdtls3866FileTraceDepth.get() + 1;\n"
+              "\t\tjdtls3866FileTraceDepth.set(traceDepth);\n"
+              "\t\tint traceSeq = jdtls3866FileTraceSeq.incrementAndGet();\n"
+              "\t\tif (traceSeq <= 120) {\n"
+              "\t\t\ttry {\n"
+              "\t\t\t\tThread t = Thread.currentThread();\n"
+              "\t\t\t\tClassLoader cl = HierarchyResolver.class.getClassLoader();\n"
+              "\t\t\t\tString row = \"ACCEPT seq=\" + traceSeq\n"
+              "\t\t\t\t\t\t+ \" depth=\" + traceDepth\n"
+              "\t\t\t\t\t\t+ \" threadId=\" + t.getId()\n"
+              "\t\t\t\t\t\t+ \" thread=\" + t.getName()\n"
+              "\t\t\t\t\t\t+ \" classLoader=\" + System.identityHashCode(cl)\n"
+              "\t\t\t\t\t\t+ \" resolver=\" + System.identityHashCode(this)\n"
+              "\t\t\t\t\t\t+ \" lookupEnv=\" + System.identityHashCode(this.lookupEnvironment)\n"
+              "\t\t\t\t\t\t+ \" sourceUnit=\" + System.identityHashCode(sourceUnit)\n"
+              "\t\t\t\t\t\t+ \" sourceClass=\" + sourceUnit.getClass().getName()\n"
+              "\t\t\t\t\t\t+ \" file=\" + new String(sourceUnit.getFileName())\n"
+              "\t\t\t\t\t\t+ \" mainType=\" + new String(sourceUnit.getMainTypeName()) + System.lineSeparator();\n"
+              "\t\t\t\tjava.nio.file.Files.writeString(java.nio.file.Path.of(System.getProperty(\"java.io.tmpdir\"), \"jdtls3866-accept-file-trace.log\"), row, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);\n"
+              "\t\t\t} catch (Throwable ignored) { }\n"
+              "\t\t}\n"
+              "\t\ttry {\n"
+          )
+          suffix = (
+              "\t\t} finally {\n"
+              "\t\t\tint nextDepth = jdtls3866FileTraceDepth.get() - 1;\n"
+              "\t\t\tif (nextDepth == 0) jdtls3866FileTraceDepth.remove(); else jdtls3866FileTraceDepth.set(nextDepth);\n"
+              "\t\t}\n"
+              "\t}"
+          )
+          text = text[:open_brace] + prefix + indented + suffix + text[close_brace + 1:]
+          path.write_text(text)
+          PY
+
+      - name: Compile patched class and prove marker exists in jar bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="jdt-core/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
+          CP="$(printf '%s:' jdtls/plugins/*.jar)"
+          mkdir patch-classes
+          javac -cp "$CP" -sourcepath '' -d patch-classes "$SRC"
+          jar uf "$CORE_JAR" -C patch-classes org/eclipse/jdt/internal/core/hierarchy
+          unzip -p "$CORE_JAR" org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.class | strings | grep -q 'jdtls3866-accept-file-trace.log'
+          echo 'PATCHED_CLASS_BYTES=CONFIRMED'
+
+      - name: Run frozen FAIL and recover independent trace file
+        shell: bash
+        run: |
+          set -u
+          mkdir -p data/fail logs
+          rm -f /tmp/jdtls3866-accept-file-trace.log
+          set +e
+          JDTLS_HOME="$PWD/jdtls" JDTLS_DATA_DIR="$PWD/data/fail" JDTLS_WAIT_MS=30000 \
+            timeout 75s node repro/jdtls-calls.mjs repro/fail repro/fail/src/main/java/foo/Foo.java 5 8 \
+            >logs/fail.stdout 2>logs/fail.stderr
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > logs/fail.exit
+          if [ -f /tmp/jdtls3866-accept-file-trace.log ]; then
+            cp /tmp/jdtls3866-accept-file-trace.log logs/accept.trace
+            echo '--- ACCEPT TRACE ---'
+            head -40 logs/accept.trace
+          else
+            : > logs/accept.trace
+          fi
+          echo "CASE_RESULT exit=$rc stack_overflow=$(grep -c 'StackOverflowError' logs/fail.stderr || true) trace_rows=$(grep -c '^ACCEPT ' logs/accept.trace || true)"
+
+      - name: Verify trace observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'StackOverflowError' logs/fail.stderr
+          grep -q '^ACCEPT ' logs/accept.trace
+          echo 'JDTLS_3866_ACCEPT_FILE_TRACE=PASS'
