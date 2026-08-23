@@ -103,7 +103,7 @@ jobs:
 
           echo "LOOKUP_SRC=$SRC" >> "$GITHUB_ENV"
 
-      - name: Inject observational compilation-unit lookup trace
+      - name: Inject observational compilation-unit lookup trace (package/name overload only)
         shell: bash
         run: |
           set -euo pipefail
@@ -118,7 +118,7 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text()
 
-          # Add only an observational sequence counter.
+          # Add observational sequence counter field.
           field_match = re.search(
               r'(?m)^([ \t]*public ITypeRequestor typeRequestor;[^\n]*\n)',
               text
@@ -139,8 +139,41 @@ jobs:
               + text[field_match.end():]
           )
 
-          # Instrument exactly the compilation-unit path immediately before
-          # LookupEnvironment delegates to ITypeRequestor.accept(...).
+          # Locate the package/name overload of askForType.
+          # Signature: ReferenceBinding askForType(PackageBinding packageBinding, char[] name, ModuleBinding clientModule)
+          overload_match = re.search(
+              r'(?m)^[ \t]*ReferenceBinding askForType\('
+              r'PackageBinding packageBinding, char\[\] name, ModuleBinding clientModule\)',
+              text
+          )
+
+          if not overload_match:
+              raise SystemExit("askForType(PackageBinding, char[], ModuleBinding) overload not found")
+
+          # Find the opening brace of this method.
+          start_pos = overload_match.end()
+          open_brace = text.index('{', start_pos)
+
+          # Scan forward to find the closing brace of the method body.
+          depth = 0
+          close_brace = None
+          for i in range(open_brace, len(text)):
+              c = text[i]
+              if c == '{':
+                  depth += 1
+              elif c == '}':
+                  depth -= 1
+                  if depth == 0:
+                      close_brace = i
+                      break
+
+          if close_brace is None:
+              raise SystemExit("method closing brace not found")
+
+          # Extract the method body (inside the braces).
+          method_body = text[open_brace + 1 : close_brace]
+
+          # Look for exactly one compilation-unit accept call within the method body.
           call_re = re.compile(
               r'(?m)^(?P<indent>[ \t]*)'
               r'this\.typeRequestor\.accept'
@@ -148,15 +181,20 @@ jobs:
               r'answer\.getAccessRestriction\(\)\);$'
           )
 
-          matches = list(call_re.finditer(text))
+          matches = list(call_re.finditer(method_body))
 
           if len(matches) != 1:
               raise SystemExit(
-                  f"expected exactly one compilation-unit accept call, found {len(matches)}"
+                  f"expected exactly one compilation-unit accept call in askForType(PackageBinding, char[], ModuleBinding) body, "
+                  f"found {len(matches)}"
               )
 
           m = matches[0]
           i = m.group("indent")
+
+          # Offset match position relative to the method body start
+          global_match_start = open_brace + 1 + m.start()
+          global_match_end = open_brace + 1 + m.end()
 
           block = (
               f"{i}org.eclipse.jdt.internal.compiler.env.ICompilationUnit "
@@ -219,7 +257,7 @@ jobs:
               f"jdtls3866Unit, answer.getAccessRestriction());"
           )
 
-          text = text[:m.start()] + block + text[m.end():]
+          text = text[:global_match_start] + block + text[global_match_end:]
           path.write_text(text)
           PY
 
@@ -243,6 +281,7 @@ jobs:
 
           PATCHED="patch-classes/org/eclipse/jdt/internal/compiler/lookup/LookupEnvironment.class"
           test -f "$PATCHED"
+
           jar uf "$BATCH_JAR" -C patch-classes org/eclipse/jdt/internal/compiler/lookup
 
       - name: Run frozen FAIL and PASS controls without changing behavior
