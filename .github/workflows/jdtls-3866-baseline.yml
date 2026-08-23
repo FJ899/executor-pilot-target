@@ -83,6 +83,17 @@ jobs:
           cp -a repro/fail workspaces/remove-test-file
           rm workspaces/remove-test-file/src/test/java/foo/bar/BagTest.java
 
+          cp -a repro/fail workspaces/remove-test-package-dir
+          rm -rf workspaces/remove-test-package-dir/src/test/java/foo/bar
+
+          cp -a repro/fail workspaces/remove-test-java-root
+          rm -rf workspaces/remove-test-java-root/src/test/java
+
+          cp -a repro/fail workspaces/move-empty-test-package
+          rm workspaces/move-empty-test-package/src/test/java/foo/bar/BagTest.java
+          rm -rf workspaces/move-empty-test-package/src/test/java/foo/bar
+          mkdir -p workspaces/move-empty-test-package/src/test/java/footest/bar
+
       - name: Run mechanism matrix
         shell: bash
         run: |
@@ -122,6 +133,11 @@ jobs:
           run_case test-only harness/test-only.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
           run_case remove-test-tree repro/jdtls-calls.mjs workspaces/remove-test-tree workspaces/remove-test-tree/src/main/java/foo/Foo.java
           run_case remove-test-file repro/jdtls-calls.mjs workspaces/remove-test-file workspaces/remove-test-file/src/main/java/foo/Foo.java
+          run_case remove-test-package-dir repro/jdtls-calls.mjs workspaces/remove-test-package-dir workspaces/remove-test-package-dir/src/main/java/foo/Foo.java
+          run_case remove-test-java-root repro/jdtls-calls.mjs workspaces/remove-test-java-root workspaces/remove-test-java-root/src/main/java/foo/Foo.java
+          run_case move-empty-test-package repro/jdtls-calls.mjs workspaces/move-empty-test-package workspaces/move-empty-test-package/src/main/java/foo/Foo.java
+          run_case bag-only-empty-same-package harness/bag-only.mjs workspaces/remove-test-file workspaces/remove-test-file/src/main/java/foo/Foo.java
+          run_case bag-only-no-test-package harness/bag-only.mjs workspaces/remove-test-package-dir workspaces/remove-test-package-dir/src/main/java/foo/Foo.java
 
           echo '--- MATRIX name exit stack_overflow_count ---'
           cat matrix.tsv
@@ -142,8 +158,8 @@ jobs:
 
           echo 'JDTLS_3866_BASELINE_STILL_VALID=YES'
           echo 'TARGET_CODE_CHANGED=NO'
-          echo 'HYPOTHESIS_H1=TESTED_NOT_PREJUDGED'
+          echo 'HYPOTHESIS_H1_REFINEMENT=TESTED_NOT_PREJUDGED'
           echo 'Experimental cells:'
-          for name in no-open target-only bag-only test-only remove-test-tree remove-test-file; do
+          for name in no-open target-only bag-only test-only remove-test-tree remove-test-file remove-test-package-dir remove-test-java-root move-empty-test-package bag-only-empty-same-package bag-only-no-test-package; do
             printf '%s stack_overflow=%s\n' "$name" "$(get_soe "$name")"
           done
