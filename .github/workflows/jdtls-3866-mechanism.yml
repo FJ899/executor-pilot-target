@@ -1,0 +1,189 @@
+name: JDTLS-3866 mechanism probe
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-mechanism.yml
+
+permissions:
+  contents: read
+
+jobs:
+  mechanism:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch exact public reproducer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
+
+      - name: Fetch pinned JDTLS snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+          EXPECTED="$(tr -d '[:space:]' < jdtls.sha256)"
+          ACTUAL="$(sha256sum jdtls.tar.gz | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED"
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+          CORE_JAR="$(find jdtls/plugins -maxdepth 1 -type f -name 'org.eclipse.jdt.core_*.jar' | head -1)"
+          test -n "$CORE_JAR"
+          echo "CORE_JAR=$CORE_JAR" >> "$GITHUB_ENV"
+          echo "core_jar=$CORE_JAR"
+
+      - name: Recover exact JDT Core source ref from bundle metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -p "$CORE_JAR" META-INF/MANIFEST.MF | tr -d '\r' > core-manifest.raw
+          awk '
+            BEGIN { first=1 }
+            /^[^ ]/ { if (!first) printf "\n"; printf "%s", $0; first=0; next }
+            /^ / { sub(/^ /, ""); printf "%s", $0 }
+            END { printf "\n" }
+          ' core-manifest.raw > core-manifest.txt
+          cat core-manifest.txt
+          SRC_LINE="$(grep '^Eclipse-SourceReferences:' core-manifest.txt || true)"
+          test -n "$SRC_LINE"
+          SRC_REF="$(printf '%s\n' "$SRC_LINE" | sed -n 's/.*[;]tag=\([^;]*\).*/\1/p' | tr -d '"')"
+          test -n "$SRC_REF"
+          echo "JDT_CORE_REF=$SRC_REF" >> "$GITHUB_ENV"
+          echo "jdt_core_ref=$SRC_REF"
+
+      - name: Fetch exact JDT Core source and inject diagnostic reentry guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/eclipse-jdt/eclipse.jdt.core.git jdt-core
+          git -C jdt-core checkout --detach "$JDT_CORE_REF"
+          SRC="jdt-core/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
+          test -f "$SRC"
+          cp "$SRC" HierarchyResolver.original.java
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          field_anchor = "\tprivate final BindingMap<IGenericType> bindingMap = new BindingMap<>();"
+          if field_anchor not in text:
+              raise SystemExit("field anchor not found")
+          text = text.replace(
+              field_anchor,
+              field_anchor + "\n\tprivate final HashSet<String> sourceUnitsBeingAccepted = new HashSet<>();",
+              1,
+          )
+
+          signature = "public void accept(ICompilationUnit sourceUnit, AccessRestriction accessRestriction)"
+          sig = text.index(signature)
+          open_brace = text.index("{", sig)
+          depth = 0
+          close_brace = None
+          for i in range(open_brace, len(text)):
+              c = text[i]
+              if c == "{":
+                  depth += 1
+              elif c == "}":
+                  depth -= 1
+                  if depth == 0:
+                      close_brace = i
+                      break
+          if close_brace is None:
+              raise SystemExit("method closing brace not found")
+
+          original_inner = text[open_brace + 1:close_brace]
+          indented = "".join("\t" + line if line.strip() else line for line in original_inner.splitlines(keepends=True))
+          replacement = "{\n" + (
+              "\t\tString sourceUnitFile = new String(sourceUnit.getFileName());\n"
+              "\t\tif (!this.sourceUnitsBeingAccepted.add(sourceUnitFile)) {\n"
+              "\t\t\tSystem.err.println(\"JDTLS3866_REENTRANT_ACCEPT_BLOCKED file=\" + sourceUnitFile);\n"
+              "\t\t\treturn;\n"
+              "\t\t}\n"
+              "\t\ttry {\n"
+          ) + indented + (
+              "\t\t} finally {\n"
+              "\t\t\tthis.sourceUnitsBeingAccepted.remove(sourceUnitFile);\n"
+              "\t\t}\n"
+              "\t}"
+          )
+          text = text[:open_brace] + replacement + text[close_brace + 1:]
+          path.write_text(text)
+          PY
+          git diff --no-index -- HierarchyResolver.original.java "$SRC" || true
+
+      - name: Compile only the patched HierarchyResolver against the pinned runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="jdt-core/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
+          CP="$(printf '%s:' jdtls/plugins/*.jar)"
+          mkdir patch-classes
+          javac -cp "$CP" -sourcepath '' -d patch-classes "$SRC"
+          find patch-classes/org/eclipse/jdt/internal/core/hierarchy -maxdepth 1 -name 'HierarchyResolver*.class' -print
+          jar uf "$CORE_JAR" -C patch-classes org/eclipse/jdt/internal/core/hierarchy
+
+      - name: Run patched FAIL and all published PASS controls
+        shell: bash
+        run: |
+          set -u
+          mkdir -p logs data
+
+          run_case() {
+            name="$1"
+            workspace="$2"
+            file="$3"
+            rm -rf "data/$name"
+            mkdir -p "data/$name"
+            set +e
+            JDTLS_HOME="$PWD/jdtls" \
+            JDTLS_DATA_DIR="$PWD/data/$name" \
+            JDTLS_WAIT_MS=30000 \
+              timeout 75s node repro/jdtls-calls.mjs "$workspace" "$file" 5 8 \
+              >"logs/$name.stdout" 2>"logs/$name.stderr"
+            rc=$?
+            set -e
+            printf '%s\n' "$rc" >"logs/$name.exit"
+            cat "logs/$name.stdout"
+            cat "logs/$name.stderr" >&2
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) reentry=$(grep -c 'JDTLS3866_REENTRANT_ACCEPT_BLOCKED' "logs/$name.stderr" || true)"
+          }
+
+          set -e
+          run_case fail repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case pass-no-module repro/pass-no-module repro/pass-no-module/src/main/java/foo/Foo.java
+          run_case pass-no-self-reference-import repro/pass-no-self-reference-import repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
+          run_case pass-separate-test-pkg repro/pass-separate-test-pkg repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
+
+      - name: Evaluate mechanism hypothesis
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(cat logs/fail.exit)" = "0"
+          ! grep -q 'StackOverflowError' logs/fail.stderr
+          grep -q 'JDTLS3866_REENTRANT_ACCEPT_BLOCKED' logs/fail.stderr
+
+          for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+            test "$(cat "logs/$name.exit")" = "0"
+            ! grep -q 'StackOverflowError' "logs/$name.stderr"
+          done
+
+          echo "JDTLS_3866_MECHANISM_PROBE=PASS"
+          echo "HYPOTHESIS=REENTRANT_ICompilationUnit_ACCEPT_DURING_HIERARCHY_COMPLETION"
+          echo "PATCH_SCOPE=DIAGNOSTIC_GUARD_ONLY"
+          echo "UPSTREAM_FIX_CLAIM=NOT_YET"
