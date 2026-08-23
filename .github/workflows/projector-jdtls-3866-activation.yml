@@ -1,0 +1,199 @@
+name: Projector JDTLS-3866 activation
+
+on:
+  push:
+    branches:
+      - projector/jdtls-3866-activation-20260823
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frozen-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      REPRO_REPO: https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git
+      REPRO_SHA: 57fa37e03621026b3b165075934a34677a6c92d9
+      JDTLS_ARCHIVE: jdt-language-server-1.61.0-202608051627.tar.gz
+      JDTLS_URL: https://download.eclipse.org/jdtls/snapshots/jdt-language-server-1.61.0-202608051627.tar.gz
+      JDTLS_SHA_URL: https://download.eclipse.org/jdtls/snapshots/jdt-language-server-1.61.0-202608051627.tar.gz.sha256
+
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Freeze environment and inputs
+        shell: bash
+        run: |
+          set -u
+          mkdir -p evidence
+          {
+            echo "activation_time_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "runner_name=$RUNNER_NAME"
+            echo "reproducer_repo=$REPRO_REPO"
+            echo "reproducer_sha=$REPRO_SHA"
+            echo "jdtls_archive=$JDTLS_ARCHIVE"
+            echo "jdtls_url=$JDTLS_URL"
+            echo "java_version_begin"
+            java -version 2>&1
+            echo "java_version_end"
+            echo "node_version=$(node --version)"
+            echo "git_version=$(git --version)"
+            echo "kernel=$(uname -a)"
+          } | tee evidence/environment.txt
+
+      - name: Acquire frozen reproducer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "$REPRO_REPO" reproducer
+          cd reproducer
+          git checkout --detach "$REPRO_SHA"
+          test "$(git rev-parse HEAD)" = "$REPRO_SHA"
+          git status --porcelain=v1 > ../evidence/reproducer-status.txt
+          git rev-parse HEAD | tee ../evidence/reproducer-head.txt
+          git ls-tree -r HEAD | tee ../evidence/reproducer-tree.txt
+
+      - name: Acquire contemporaneous JDTLS snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p jdtls
+          curl -fL --retry 3 --retry-delay 2 "$JDTLS_URL" -o "$JDTLS_ARCHIVE"
+          curl -fL --retry 3 --retry-delay 2 "$JDTLS_SHA_URL" -o "$JDTLS_ARCHIVE.sha256"
+          cat "$JDTLS_ARCHIVE.sha256" | tee evidence/jdtls-published-sha256.txt
+          sha256sum "$JDTLS_ARCHIVE" | tee evidence/jdtls-actual-sha256.txt
+          expected="$(awk '{print $1}' "$JDTLS_ARCHIVE.sha256")"
+          actual="$(sha256sum "$JDTLS_ARCHIVE" | awk '{print $1}')"
+          test "$actual" = "$expected"
+          tar -xzf "$JDTLS_ARCHIVE" -C jdtls
+          find jdtls -maxdepth 2 -type f | sort > evidence/jdtls-file-list.txt
+          ls jdtls/plugins/org.eclipse.equinox.launcher_*.jar | sort | tail -1 | tee evidence/jdtls-launcher.txt
+
+      - name: Execute frozen fail and published controls unchanged
+        shell: bash
+        run: |
+          set -u
+          mkdir -p evidence/runs
+
+          run_case() {
+            case_name="$1"
+            workspace="$2"
+            java_file="$3"
+            data_dir="$RUNNER_TEMP/jdtls-3866-$case_name"
+            rm -rf "$data_dir"
+            mkdir -p "$data_dir"
+
+            echo "CASE=$case_name" > "evidence/runs/$case_name.meta.txt"
+            echo "WORKSPACE=$workspace" >> "evidence/runs/$case_name.meta.txt"
+            echo "FILE=$java_file" >> "evidence/runs/$case_name.meta.txt"
+            echo "DATA_DIR=$data_dir" >> "evidence/runs/$case_name.meta.txt"
+
+            set +e
+            timeout --signal=TERM --kill-after=10s 120s \
+              env JDTLS_HOME="$GITHUB_WORKSPACE/jdtls" \
+                  JDTLS_DATA_DIR="$data_dir" \
+                  JDTLS_WAIT_MS=30000 \
+              node reproducer/jdtls-calls.mjs \
+                "reproducer/$workspace" \
+                "reproducer/$java_file" \
+                5 8 \
+                > "evidence/runs/$case_name.log" 2>&1
+            rc=$?
+            set -e
+
+            echo "$rc" > "evidence/runs/$case_name.exit_code.txt"
+            if grep -q 'StackOverflowError' "evidence/runs/$case_name.log"; then
+              echo "STACK_OVERFLOW=YES" > "evidence/runs/$case_name.classification.txt"
+            else
+              echo "STACK_OVERFLOW=NO" > "evidence/runs/$case_name.classification.txt"
+            fi
+            echo "EXIT_CODE=$rc" >> "evidence/runs/$case_name.classification.txt"
+
+            if [ -f "$data_dir/.metadata/.log" ]; then
+              cp "$data_dir/.metadata/.log" "evidence/runs/$case_name.metadata.log"
+            fi
+
+            cat "evidence/runs/$case_name.classification.txt"
+          }
+
+          run_case fail \
+            fail \
+            fail/src/main/java/foo/Foo.java
+
+          run_case pass-no-module \
+            pass-no-module \
+            pass-no-module/src/main/java/foo/Foo.java
+
+          run_case pass-no-self-reference-import \
+            pass-no-self-reference-import \
+            pass-no-self-reference-import/src/main/java/foo/Foo.java
+
+          run_case pass-separate-test-pkg \
+            pass-separate-test-pkg \
+            pass-separate-test-pkg/src/main/java/foo/Foo.java
+
+      - name: Classify E4 execution evidence
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          result="INCOMPLETE"
+
+          have_all=yes
+          for c in fail pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+            [ -f "evidence/runs/$c.classification.txt" ] || have_all=no
+          done
+
+          if [ "$have_all" = yes ]; then
+            baseline_so="$(grep '^STACK_OVERFLOW=' evidence/runs/fail.classification.txt | cut -d= -f2)"
+            controls_ok=yes
+            for c in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+              so="$(grep '^STACK_OVERFLOW=' "evidence/runs/$c.classification.txt" | cut -d= -f2)"
+              rc="$(grep '^EXIT_CODE=' "evidence/runs/$c.classification.txt" | cut -d= -f2)"
+              if [ "$so" != NO ] || [ "$rc" != 0 ]; then
+                controls_ok=no
+              fi
+            done
+
+            if [ "$baseline_so" = YES ] && [ "$controls_ok" = yes ]; then
+              result="PASS"
+            elif [ "$baseline_so" = NO ]; then
+              result="BASELINE_NON_REPRODUCTION"
+            else
+              result="CONTROL_MISMATCH"
+            fi
+          fi
+
+          {
+            echo "JDTLS_3866_E4_EXECUTION=$result"
+            echo "WORKFLOW_GREEN_IS_NOT_PRODUCT_PASS=true"
+            echo "NO_SOURCE_CODE_WAS_MODIFIED=true"
+          } | tee evidence/activation-verdict.txt
+
+          echo "## JDTLS-3866 activation" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat evidence/activation-verdict.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw activation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jdtls-3866-activation-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
