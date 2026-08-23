@@ -174,13 +174,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          test "$(cat logs/fail.exit)" = "0"
+          # The harness exits non-zero during its own child-process shutdown even on
+          # semantically successful controls. Classify by observable LSP result, not
+          # by the Node wrapper's process exit code.
           ! grep -q 'StackOverflowError' logs/fail.stderr
           grep -q 'JDTLS3866_REENTRANT_ACCEPT_BLOCKED' logs/fail.stderr
+          grep -q '^Prepared:' logs/fail.stdout
+          grep -q '^Target:' logs/fail.stdout
+          grep -q '^Outgoing calls:' logs/fail.stdout
+          ! grep -q 'No call hierarchy item prepared' logs/fail.stdout
 
           for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
-            test "$(cat "logs/$name.exit")" = "0"
             ! grep -q 'StackOverflowError' "logs/$name.stderr"
+            ! grep -q 'JDTLS3866_REENTRANT_ACCEPT_BLOCKED' "logs/$name.stderr"
+            grep -q '^Prepared:' "logs/$name.stdout"
+            grep -q '^Target:' "logs/$name.stdout"
+            grep -q '^Outgoing calls:' "logs/$name.stdout"
+            ! grep -q 'No call hierarchy item prepared' "logs/$name.stdout"
           done
 
           echo "JDTLS_3866_MECHANISM_PROBE=PASS"
