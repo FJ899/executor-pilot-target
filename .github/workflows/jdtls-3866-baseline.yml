@@ -1,0 +1,165 @@
+name: JDTLS-3866 mechanism matrix
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-baseline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  mechanism-matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          java -version
+          node --version
+          git --version
+
+      - name: Fetch exact public reproducer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
+          echo "repro_sha=$(git -C repro rev-parse HEAD)"
+
+      - name: Fetch pinned JDTLS snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+          EXPECTED="$(tr -d '[:space:]' < jdtls.sha256)"
+          ACTUAL="$(sha256sum jdtls.tar.gz | awk '{print $1}')"
+          echo "jdtls_snapshot=$SNAP"
+          echo "jdtls_sha256_expected=$EXPECTED"
+          echo "jdtls_sha256_actual=$ACTUAL"
+          test "$ACTUAL" = "$EXPECTED"
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+
+      - name: Prepare controlled mechanism variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p harness workspaces
+
+          python - <<'PY'
+          from pathlib import Path
+
+          src = Path('repro/jdtls-calls.mjs').read_text()
+          needle = '  await openAllDocuments();'
+          assert src.count(needle) == 1
+
+          variants = {
+              'no-open': '  // mechanism experiment: no didOpen notifications',
+              'target-only': '  await openDocument(file);',
+              'bag-only': "  await openDocument(join(workspace, 'src/main/java/foo/bar/Bag.java'));",
+              'test-only': "  await openDocument(join(workspace, 'src/test/java/foo/bar/BagTest.java'));",
+          }
+          for name, replacement in variants.items():
+              Path(f'harness/{name}.mjs').write_text(src.replace(needle, replacement))
+          PY
+
+          cp -a repro/fail workspaces/remove-test-tree
+          rm -rf workspaces/remove-test-tree/src/test
+
+          cp -a repro/fail workspaces/remove-test-file
+          rm workspaces/remove-test-file/src/test/java/foo/bar/BagTest.java
+
+          cp -a repro/fail workspaces/remove-test-package-dir
+          rm -rf workspaces/remove-test-package-dir/src/test/java/foo/bar
+
+          cp -a repro/fail workspaces/remove-test-java-root
+          rm -rf workspaces/remove-test-java-root/src/test/java
+
+          cp -a repro/fail workspaces/move-empty-test-package
+          rm workspaces/move-empty-test-package/src/test/java/foo/bar/BagTest.java
+          rm -rf workspaces/move-empty-test-package/src/test/java/foo/bar
+          mkdir -p workspaces/move-empty-test-package/src/test/java/footest/bar
+
+      - name: Run mechanism matrix
+        shell: bash
+        run: |
+          set -u
+          mkdir -p logs data
+          : > matrix.tsv
+
+          run_case() {
+            name="$1"
+            script="$2"
+            workspace="$3"
+            file="$4"
+            rm -rf "data/$name"
+            mkdir -p "data/$name"
+            set +e
+            JDTLS_HOME="$PWD/jdtls" \
+            JDTLS_DATA_DIR="$PWD/data/$name" \
+            JDTLS_WAIT_MS=30000 \
+              timeout 75s node "$script" "$workspace" "$file" 5 8 \
+              >"logs/$name.stdout" 2>"logs/$name.stderr"
+            rc=$?
+            set -e
+            soe=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true)
+            printf '%s\t%s\t%s\n' "$name" "$rc" "$soe" >> matrix.tsv
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$soe"
+          }
+
+          set -e
+          run_case baseline repro/jdtls-calls.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case pass-no-module repro/jdtls-calls.mjs repro/pass-no-module repro/pass-no-module/src/main/java/foo/Foo.java
+          run_case pass-no-self-reference-import repro/jdtls-calls.mjs repro/pass-no-self-reference-import repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
+          run_case pass-separate-test-pkg repro/jdtls-calls.mjs repro/pass-separate-test-pkg repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
+
+          run_case no-open harness/no-open.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case target-only harness/target-only.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case bag-only harness/bag-only.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case test-only harness/test-only.mjs repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case remove-test-tree repro/jdtls-calls.mjs workspaces/remove-test-tree workspaces/remove-test-tree/src/main/java/foo/Foo.java
+          run_case remove-test-file repro/jdtls-calls.mjs workspaces/remove-test-file workspaces/remove-test-file/src/main/java/foo/Foo.java
+          run_case remove-test-package-dir repro/jdtls-calls.mjs workspaces/remove-test-package-dir workspaces/remove-test-package-dir/src/main/java/foo/Foo.java
+          run_case remove-test-java-root repro/jdtls-calls.mjs workspaces/remove-test-java-root workspaces/remove-test-java-root/src/main/java/foo/Foo.java
+          run_case move-empty-test-package repro/jdtls-calls.mjs workspaces/move-empty-test-package workspaces/move-empty-test-package/src/main/java/foo/Foo.java
+          run_case bag-only-empty-same-package harness/bag-only.mjs workspaces/remove-test-file workspaces/remove-test-file/src/main/java/foo/Foo.java
+          run_case bag-only-no-test-package harness/bag-only.mjs workspaces/remove-test-package-dir workspaces/remove-test-package-dir/src/main/java/foo/Foo.java
+
+          echo '--- MATRIX name exit stack_overflow_count ---'
+          cat matrix.tsv
+
+      - name: Preserve baseline validity and report experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          get_soe() {
+            awk -F '\t' -v key="$1" '$1 == key { print $3 }' matrix.tsv
+          }
+
+          test "$(get_soe baseline)" -gt 0
+          for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+            test "$(get_soe "$name")" -eq 0
+          done
+
+          echo 'JDTLS_3866_BASELINE_STILL_VALID=YES'
+          echo 'TARGET_CODE_CHANGED=NO'
+          echo 'HYPOTHESIS_H1_REFINEMENT=TESTED_NOT_PREJUDGED'
+          echo 'Experimental cells:'
+          for name in no-open target-only bag-only test-only remove-test-tree remove-test-file remove-test-package-dir remove-test-java-root move-empty-test-package bag-only-empty-same-package bag-only-no-test-package; do
+            printf '%s stack_overflow=%s\n' "$name" "$(get_soe "$name")"
+          done
