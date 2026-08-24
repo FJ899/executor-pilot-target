@@ -1,0 +1,117 @@
+name: JDTLS-3866 baseline
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-baseline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          java -version
+          node --version
+          git --version
+
+      - name: Fetch exact public reproducer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
+          echo "repro_sha=$(git -C repro rev-parse HEAD)"
+
+      - name: Fetch pinned JDTLS snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+          EXPECTED="$(tr -d '[:space:]' < jdtls.sha256)"
+          ACTUAL="$(sha256sum jdtls.tar.gz | awk '{print $1}')"
+          echo "jdtls_snapshot=$SNAP"
+          echo "jdtls_sha256_expected=$EXPECTED"
+          echo "jdtls_sha256_actual=$ACTUAL"
+          test "$ACTUAL" = "$EXPECTED"
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+          test -d jdtls/plugins
+          ls jdtls/plugins/org.eclipse.equinox.launcher_*.jar >/dev/null
+
+      - name: Run FAIL and published PASS controls without target changes
+        shell: bash
+        run: |
+          set -u
+          mkdir -p logs data
+
+          run_case() {
+            name="$1"
+            workspace="$2"
+            file="$3"
+            rm -rf "data/$name"
+            mkdir -p "data/$name"
+            set +e
+            JDTLS_HOME="$PWD/jdtls" \
+            JDTLS_DATA_DIR="$PWD/data/$name" \
+            JDTLS_WAIT_MS=30000 \
+              timeout 75s node repro/jdtls-calls.mjs "$workspace" "$file" 5 8 \
+              >"logs/$name.stdout" 2>"logs/$name.stderr"
+            rc=$?
+            set -e
+            printf '%s\n' "$rc" >"logs/$name.exit"
+            cat "logs/$name.stdout"
+            cat "logs/$name.stderr" >&2
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true)"
+          }
+
+          set -e
+          run_case fail \
+            repro/fail \
+            repro/fail/src/main/java/foo/Foo.java
+          run_case pass-no-module \
+            repro/pass-no-module \
+            repro/pass-no-module/src/main/java/foo/Foo.java
+          run_case pass-no-self-reference-import \
+            repro/pass-no-self-reference-import \
+            repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
+          run_case pass-separate-test-pkg \
+            repro/pass-separate-test-pkg \
+            repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
+
+      - name: Evaluate baseline contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "FAIL control must contain StackOverflowError"
+          grep -q 'StackOverflowError' logs/fail.stderr
+
+          echo "Published PASS controls must not contain StackOverflowError"
+          for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+            if grep -q 'StackOverflowError' "logs/$name.stderr"; then
+              echo "UNEXPECTED_STACK_OVERFLOW in $name"
+              exit 1
+            fi
+          done
+
+          echo "JDTLS_3866_BASELINE=CONFIRMED"
+          echo "TARGET_CODE_CHANGED=NO"
+          echo "REPRO_SHA=57fa37e03621026b3b165075934a34677a6c92d9"
+          echo "JDTLS_SNAPSHOT=jdt-language-server-1.61.0-202607301809.tar.gz"

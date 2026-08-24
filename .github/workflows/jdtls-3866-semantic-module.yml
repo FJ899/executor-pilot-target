@@ -1,0 +1,173 @@
+name: JDTLS-3866 semantic module reentry probe
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-semantic-module.yml
+
+permissions:
+  contents: read
+
+jobs:
+  semantic-module-reentry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch frozen reproducer and JDTLS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
+
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+          EXPECTED="$(tr -d '[:space:]' < jdtls.sha256)"
+          ACTUAL="$(sha256sum jdtls.tar.gz | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED"
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+          CORE_JAR="$(find jdtls/plugins -maxdepth 1 -type f -name 'org.eclipse.jdt.core_*.jar' | head -1)"
+          test -n "$CORE_JAR"
+          echo "CORE_JAR=$CORE_JAR" >> "$GITHUB_ENV"
+
+          unzip -p "$CORE_JAR" META-INF/MANIFEST.MF | tr -d '\r' > core-manifest.raw
+          awk 'BEGIN {first=1} /^[^ ]/ {if (!first) printf "\n"; printf "%s",$0; first=0; next} /^ / {sub(/^ /,""); printf "%s",$0} END {printf "\n"}' core-manifest.raw > core-manifest.txt
+          EXPECTED_CORE_COMMIT="83574082f7f08268c6d31d2c6d0aa7e78c192672"
+          grep '^Eclipse-SourceReferences:' core-manifest.txt | grep -q "commitId=$EXPECTED_CORE_COMMIT"
+          echo "JDT_CORE_COMMIT=$EXPECTED_CORE_COMMIT" >> "$GITHUB_ENV"
+
+      - name: Inject semantic module-info reentry diagnostic guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/eclipse-jdt/eclipse.jdt.core.git jdt-core
+          git -C jdt-core checkout --detach "$JDT_CORE_COMMIT"
+          test "$(git -C jdt-core rev-parse HEAD)" = "$JDT_CORE_COMMIT"
+          SRC="jdt-core/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
+          cp "$SRC" HierarchyResolver.original.java
+
+          python3 - "$SRC" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          anchor = "\tprivate final BindingMap<IGenericType> bindingMap = new BindingMap<>();"
+          if anchor not in text:
+              raise SystemExit("field anchor not found")
+          field = (
+              "\n\tprivate static final ThreadLocal<java.util.HashMap<String, String>> "
+              "semanticAcceptOwners = ThreadLocal.withInitial(java.util.HashMap::new);"
+          )
+          text = text.replace(anchor, anchor + field, 1)
+
+          signature = "public void accept(ICompilationUnit sourceUnit, AccessRestriction accessRestriction)"
+          sig = text.index(signature)
+          open_brace = text.index("{", sig)
+          depth = 0
+          close_brace = None
+          for i in range(open_brace, len(text)):
+              if text[i] == "{":
+                  depth += 1
+              elif text[i] == "}":
+                  depth -= 1
+                  if depth == 0:
+                      close_brace = i
+                      break
+          if close_brace is None:
+              raise SystemExit("method closing brace not found")
+
+          inner = text[open_brace + 1:close_brace]
+          indented = "".join("\t" + line if line.strip() else line for line in inner.splitlines(keepends=True))
+          replacement = "{\n" + (
+              "\t\tString semanticKey = new String(sourceUnit.getMainTypeName());\n"
+              "\t\tString currentFile = new String(sourceUnit.getFileName());\n"
+              "\t\tjava.util.HashMap<String, String> active = semanticAcceptOwners.get();\n"
+              "\t\tString currentOwner = currentFile + \"@\" + System.identityHashCode(this);\n"
+              "\t\tString priorOwner = active.putIfAbsent(semanticKey, currentOwner);\n"
+              "\t\tif (priorOwner != null) {\n"
+              "\t\t\tSystem.err.println(\"JDTLS3866_SEMANTIC_MODULE_REENTRY_BLOCKED key=\" + semanticKey\n"
+              "\t\t\t\t\t+ \" prior=\" + priorOwner + \" current=\" + currentOwner);\n"
+              "\t\t\treturn;\n"
+              "\t\t}\n"
+              "\t\ttry {\n"
+          ) + indented + (
+              "\t\t} finally {\n"
+              "\t\t\tactive.remove(semanticKey);\n"
+              "\t\t\tif (active.isEmpty()) semanticAcceptOwners.remove();\n"
+              "\t\t}\n"
+              "\t}"
+          )
+          text = text[:open_brace] + replacement + text[close_brace + 1:]
+          path.write_text(text)
+          PY
+          git diff --no-index -- HierarchyResolver.original.java "$SRC" || true
+
+      - name: Compile patched class into pinned runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="jdt-core/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
+          CP="$(printf '%s:' jdtls/plugins/*.jar)"
+          mkdir patch-classes
+          javac -cp "$CP" -sourcepath '' -d patch-classes "$SRC"
+          test -f patch-classes/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.class
+          jar uf "$CORE_JAR" -C patch-classes org/eclipse/jdt/internal/core/hierarchy
+
+      - name: Run frozen FAIL and PASS controls
+        shell: bash
+        run: |
+          set -u
+          mkdir -p logs data
+          run_case() {
+            name="$1"; workspace="$2"; file="$3"
+            rm -rf "data/$name"; mkdir -p "data/$name"
+            set +e
+            JDTLS_HOME="$PWD/jdtls" JDTLS_DATA_DIR="$PWD/data/$name" JDTLS_WAIT_MS=30000 \
+              timeout 75s node repro/jdtls-calls.mjs "$workspace" "$file" 5 8 \
+              >"logs/$name.stdout" 2>"logs/$name.stderr"
+            rc=$?
+            set -e
+            printf '%s\n' "$rc" >"logs/$name.exit"
+            cat "logs/$name.stdout"
+            cat "logs/$name.stderr" >&2
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) semantic_reentry=$(grep -c 'JDTLS3866_SEMANTIC_MODULE_REENTRY_BLOCKED' "logs/$name.stderr" || true)"
+          }
+          set -e
+          run_case fail repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case pass-no-module repro/pass-no-module repro/pass-no-module/src/main/java/foo/Foo.java
+          run_case pass-no-self-reference-import repro/pass-no-self-reference-import repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
+          run_case pass-separate-test-pkg repro/pass-separate-test-pkg repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
+
+      - name: Evaluate semantic module reentry hypothesis
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -q 'StackOverflowError' logs/fail.stderr
+          grep -q 'JDTLS3866_SEMANTIC_MODULE_REENTRY_BLOCKED key=module-info' logs/fail.stderr
+          grep -q '^Prepared:' logs/fail.stdout
+          grep -q '^Target:' logs/fail.stdout
+          grep -q '^Outgoing calls:' logs/fail.stdout
+          ! grep -q 'No call hierarchy item prepared' logs/fail.stdout
+
+          for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+            ! grep -q 'StackOverflowError' "logs/$name.stderr"
+            ! grep -q 'JDTLS3866_SEMANTIC_MODULE_REENTRY_BLOCKED' "logs/$name.stderr"
+            grep -q '^Prepared:' "logs/$name.stdout"
+            grep -q '^Target:' "logs/$name.stdout"
+            grep -q '^Outgoing calls:' "logs/$name.stdout"
+          done
+
+          echo "JDTLS_3866_SEMANTIC_MODULE_REENTRY_PROBE=PASS"
+          echo "MECHANISM=REENTRANT_SEMANTIC_MODULE_INFO_COMPLETION_DURING_IMPORT_RESOLUTION"
+          echo "UPSTREAM_FIX_CLAIM=NOT_YET"

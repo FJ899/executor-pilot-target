@@ -1,0 +1,65 @@
+name: JDTLS-3866 runtime classload trace
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-classload-trace.yml
+
+permissions:
+  contents: read
+
+jobs:
+  classload-trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch frozen reproducer and pinned JDTLS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+          EXPECTED="$(tr -d '[:space:]' < jdtls.sha256)"
+          ACTUAL="$(sha256sum jdtls.tar.gz | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED"
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+
+      - name: Reproduce FAIL with JVM class-load provenance
+        shell: bash
+        run: |
+          set -u
+          mkdir -p data/fail logs
+          rm -f /tmp/jdtls3866-classload.log
+          set +e
+          JAVA_TOOL_OPTIONS='-Xlog:class+load=info:file=/tmp/jdtls3866-classload.log' \
+          JDTLS_HOME="$PWD/jdtls" \
+          JDTLS_DATA_DIR="$PWD/data/fail" \
+          JDTLS_WAIT_MS=30000 \
+            timeout 75s node repro/jdtls-calls.mjs repro/fail repro/fail/src/main/java/foo/Foo.java 5 8 \
+            >logs/fail.stdout 2>logs/fail.stderr
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > logs/fail.exit
+          cp /tmp/jdtls3866-classload.log logs/classload.log
+          grep -F 'org.eclipse.jdt.internal.core.hierarchy.HierarchyResolver source:' logs/classload.log || true
+          echo "CASE_RESULT exit=$rc stack_overflow=$(grep -c 'StackOverflowError' logs/fail.stderr || true) hierarchy_classload=$(grep -c 'HierarchyResolver source:' logs/classload.log || true)"
+
+      - name: Verify class-load trace evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'StackOverflowError' logs/fail.stderr
+          grep -q 'HierarchyResolver source:' logs/classload.log
+          echo 'JDTLS_3866_CLASSLOAD_TRACE=PASS'

@@ -1,0 +1,419 @@
+name: JDTLS-3866 lookup trace
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/jdtls-3866-lookup-trace.yml
+
+permissions:
+  contents: read
+
+jobs:
+  lookup-trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch frozen reproducer and bind exact JDT Core bundle sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone https://github.com/usrlocl/jdtls-stackoverflow-reproduce.git repro
+          git -C repro checkout --detach 57fa37e03621026b3b165075934a34677a6c92d9
+          test "$(git -C repro rev-parse HEAD)" = "57fa37e03621026b3b165075934a34677a6c92d9"
+
+          URL_BASE="https://download.eclipse.org/jdtls/snapshots"
+          SNAP="jdt-language-server-1.61.0-202607301809.tar.gz"
+
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$URL_BASE/$SNAP" -o jdtls.tar.gz
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$URL_BASE/$SNAP.sha256" -o jdtls.sha256
+
+          EXPECTED="$(tr -d '[:space:]' < jdtls.sha256)"
+          ACTUAL="$(sha256sum jdtls.tar.gz | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED"
+
+          mkdir jdtls
+          tar -xzf jdtls.tar.gz -C jdtls
+
+          BATCH_JAR="$(
+            find jdtls/plugins -maxdepth 1 -type f \
+              -name 'org.eclipse.jdt.core.compiler.batch_*.jar' | head -1
+          )"
+          CORE_JAR="$(
+            find jdtls/plugins -maxdepth 1 -type f \
+              -name 'org.eclipse.jdt.core_*.jar' | head -1
+          )"
+
+          test -n "$BATCH_JAR"
+          test -n "$CORE_JAR"
+          echo "BATCH_JAR=$BATCH_JAR" >> "$GITHUB_ENV"
+          echo "CORE_JAR=$CORE_JAR" >> "$GITHUB_ENV"
+          echo "batch_jar=$BATCH_JAR"
+          echo "core_jar=$CORE_JAR"
+
+          unfold_manifest() {
+            jar="$1"; out="$2"
+            unzip -p "$jar" META-INF/MANIFEST.MF | tr -d '\r' > "$out.raw"
+            awk '
+              BEGIN { first=1 }
+              /^[^ ]/ {
+                if (!first) printf "\n"
+                printf "%s", $0
+                first=0
+                next
+              }
+              /^ / {
+                sub(/^ /, "")
+                printf "%s", $0
+              }
+              END { printf "\n" }
+            ' "$out.raw" > "$out.txt"
+          }
+
+          manifest_commit() {
+            file="$1"
+            line="$(grep '^Eclipse-SourceReferences:' "$file" || true)"
+            test -n "$line"
+            printf '%s\n' "$line" |
+              sed -n 's/.*commitId=\([^;]*\).*/\1/p' |
+              tr -d '"[:space:]'
+          }
+
+          unfold_manifest "$BATCH_JAR" batch-manifest
+          unfold_manifest "$CORE_JAR" core-manifest
+
+          BATCH_COMMIT="$(manifest_commit batch-manifest.txt)"
+          CORE_COMMIT="$(manifest_commit core-manifest.txt)"
+
+          [[ "$BATCH_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CORE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+
+          echo "JDT_BATCH_COMMIT=$BATCH_COMMIT" >> "$GITHUB_ENV"
+          echo "JDT_CORE_COMMIT=$CORE_COMMIT" >> "$GITHUB_ENV"
+          echo "jdt_batch_commit=$BATCH_COMMIT"
+          echo "jdt_core_commit=$CORE_COMMIT"
+
+      - name: Fetch exact JDT Core source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone https://github.com/eclipse-jdt/eclipse.jdt.core.git jdt-core
+          git -C jdt-core worktree add --detach ../jdt-batch "$JDT_BATCH_COMMIT"
+          git -C jdt-core worktree add --detach ../jdt-model "$JDT_CORE_COMMIT"
+
+          test "$(git -C jdt-batch rev-parse HEAD)" = "$JDT_BATCH_COMMIT"
+          test "$(git -C jdt-model rev-parse HEAD)" = "$JDT_CORE_COMMIT"
+
+          LOOKUP_SRC="jdt-batch/org.eclipse.jdt.core.compiler.batch/src/org/eclipse/jdt/internal/compiler/lookup/LookupEnvironment.java"
+          HIER_SRC="jdt-model/org.eclipse.jdt.core/model/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.java"
+
+          test -f "$LOOKUP_SRC"
+          test -f "$HIER_SRC"
+
+          echo "LOOKUP_SRC=$LOOKUP_SRC" >> "$GITHUB_ENV"
+          echo "HIER_SRC=$HIER_SRC" >> "$GITHUB_ENV"
+
+      - name: Inject bounded source-type dispatch marker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp "$LOOKUP_SRC" LookupEnvironment.original.java
+
+          python3 - "$LOOKUP_SRC" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          field_match = re.search(
+              r'(?m)^([ \t]*public ITypeRequestor typeRequestor;[^\n]*\n)',
+              text
+          )
+          if not field_match:
+              raise SystemExit("ITypeRequestor field anchor not found")
+
+          field = (
+              "\tprivate static final java.util.concurrent.atomic.AtomicInteger "
+              "jdtls3866SourceTypeDispatchSeq = "
+              "new java.util.concurrent.atomic.AtomicInteger();\n"
+          )
+          text = text[:field_match.end()] + field + text[field_match.end():]
+
+          overload_match = re.search(
+              r'(?m)^[ \t]*ReferenceBinding askForType\('
+              r'PackageBinding packageBinding, char\[\] name, ModuleBinding clientModule\)',
+              text
+          )
+          if not overload_match:
+              raise SystemExit("askForType(PackageBinding, char[], ModuleBinding) overload not found")
+
+          open_brace = text.index('{', overload_match.end())
+          depth = 0
+          close_brace = None
+          for pos in range(open_brace, len(text)):
+              if text[pos] == '{':
+                  depth += 1
+              elif text[pos] == '}':
+                  depth -= 1
+                  if depth == 0:
+                      close_brace = pos
+                      break
+          if close_brace is None:
+              raise SystemExit("askForType overload closing brace not found")
+
+          method_body = text[open_brace + 1:close_brace]
+          call_re = re.compile(
+              r'(?m)^(?P<indent>[ \t]*)'
+              r'this\.typeRequestor\.accept\('
+              r'answer\.getSourceTypes\(\), answerPackage, '
+              r'answer\.getAccessRestriction\(\)\);$'
+          )
+          matches = list(call_re.finditer(method_body))
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"expected exactly one source-type accept call in target overload, found {len(matches)}"
+              )
+
+          match = matches[0]
+          indent = match.group('indent')
+          start = open_brace + 1 + match.start()
+          end = open_brace + 1 + match.end()
+
+          block = (
+              f"{indent}org.eclipse.jdt.internal.compiler.env.ISourceType[] "
+              f"jdtls3866SourceTypes = answer.getSourceTypes();\n"
+              f"{indent}int jdtls3866Seq = "
+              f"jdtls3866SourceTypeDispatchSeq.incrementAndGet();\n"
+              f"{indent}if (jdtls3866Seq <= 120) {{\n"
+              f"{indent}\ttry {{\n"
+              f"{indent}\t\torg.eclipse.jdt.internal.compiler.env.ISourceType "
+              f"jdtls3866First = jdtls3866SourceTypes == null || "
+              f"jdtls3866SourceTypes.length == 0 ? null : jdtls3866SourceTypes[0];\n"
+              f"{indent}\t\tString jdtls3866File = jdtls3866First == null || "
+              f"jdtls3866First.getFileName() == null ? \"<null>\" : "
+              f"new String(jdtls3866First.getFileName());\n"
+              f"{indent}\t\tString jdtls3866Package = answerPackage == null ? "
+              f"\"<null>\" : CharOperation.toString(answerPackage.compoundName);\n"
+              f"{indent}\t\tString jdtls3866Sought = name == null ? "
+              f"\"<null>\" : new String(name);\n"
+              f"{indent}\t\tString jdtls3866ClientModule = clientModule == null || "
+              f"clientModule.moduleName == null ? \"<null>\" : new String(clientModule.moduleName);\n"
+              f"{indent}\t\tString jdtls3866AnswerModule = answer.moduleBinding == null || "
+              f"answer.moduleBinding.moduleName == null ? \"<null>\" : "
+              f"new String(answer.moduleBinding.moduleName);\n"
+              f"{indent}\t\tSystem.err.println(\"SOURCE_TYPE_DISPATCH seq=\" + jdtls3866Seq\n"
+              f"{indent}\t\t\t+ \" threadId=\" + Thread.currentThread().getId()\n"
+              f"{indent}\t\t\t+ \" sourceTypes=\" + System.identityHashCode(jdtls3866SourceTypes)\n"
+              f"{indent}\t\t\t+ \" first=\" + System.identityHashCode(jdtls3866First)\n"
+              f"{indent}\t\t\t+ \" file=\" + jdtls3866File\n"
+              f"{indent}\t\t\t+ \" count=\" + (jdtls3866SourceTypes == null ? -1 : jdtls3866SourceTypes.length)\n"
+              f"{indent}\t\t\t+ \" lookupEnv=\" + System.identityHashCode(this)\n"
+              f"{indent}\t\t\t+ \" requestor=\" + System.identityHashCode(this.typeRequestor)\n"
+              f"{indent}\t\t\t+ \" package=\" + jdtls3866Package\n"
+              f"{indent}\t\t\t+ \" sought=\" + jdtls3866Sought\n"
+              f"{indent}\t\t\t+ \" clientModule=\" + jdtls3866ClientModule\n"
+              f"{indent}\t\t\t+ \" answerModule=\" + jdtls3866AnswerModule\n"
+              f"{indent}\t\t\t+ \" step=\" + this.stepCompleted);\n"
+              f"{indent}\t}} catch (Throwable ignored) {{\n"
+              f"{indent}\t}}\n"
+              f"{indent}}}\n"
+              f"{indent}this.typeRequestor.accept("
+              f"jdtls3866SourceTypes, answerPackage, answer.getAccessRestriction());"
+          )
+
+          text = text[:start] + block + text[end:]
+          path.write_text(text)
+          PY
+
+          git diff --no-index -- LookupEnvironment.original.java "$LOOKUP_SRC" || true
+
+      - name: Inject bounded source-type accept marker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp "$HIER_SRC" HierarchyResolver.original.java
+
+          python3 - "$HIER_SRC" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          field_match = re.search(
+              r'(?m)^([ \t]*private final BindingMap<IGenericType> bindingMap = new BindingMap<>\(\);[^\n]*\n)',
+              text
+          )
+          if not field_match:
+              raise SystemExit("HierarchyResolver field anchor not found")
+
+          field = (
+              "\tprivate static final java.util.concurrent.atomic.AtomicInteger "
+              "jdtls3866SourceTypeAcceptSeq = "
+              "new java.util.concurrent.atomic.AtomicInteger();\n"
+          )
+          text = text[:field_match.end()] + field + text[field_match.end():]
+
+          method_match = re.search(
+              r'(?m)^[ \t]*public void accept\('
+              r'ISourceType\[\] sourceTypes, PackageBinding packageBinding, '
+              r'AccessRestriction accessRestriction\)',
+              text
+          )
+          if not method_match:
+              raise SystemExit("HierarchyResolver.accept(ISourceType[], ...) not found")
+
+          open_brace = text.index('{', method_match.end())
+          entry = (
+              "\n\tint jdtls3866Seq = jdtls3866SourceTypeAcceptSeq.incrementAndGet();\n"
+              "\tif (jdtls3866Seq <= 120) {\n"
+              "\t\ttry {\n"
+              "\t\t\tISourceType jdtls3866First = sourceTypes == null || sourceTypes.length == 0 ? null : sourceTypes[0];\n"
+              "\t\t\tString jdtls3866File = jdtls3866First == null || jdtls3866First.getFileName() == null ? \"<null>\" : new String(jdtls3866First.getFileName());\n"
+              "\t\t\tSystem.err.println(\"SOURCE_TYPE_ACCEPT seq=\" + jdtls3866Seq\n"
+              "\t\t\t\t+ \" threadId=\" + Thread.currentThread().getId()\n"
+              "\t\t\t\t+ \" sourceTypes=\" + System.identityHashCode(sourceTypes)\n"
+              "\t\t\t\t+ \" first=\" + System.identityHashCode(jdtls3866First)\n"
+              "\t\t\t\t+ \" file=\" + jdtls3866File\n"
+              "\t\t\t\t+ \" count=\" + (sourceTypes == null ? -1 : sourceTypes.length)\n"
+              "\t\t\t\t+ \" resolver=\" + System.identityHashCode(this)\n"
+              "\t\t\t\t+ \" lookupEnv=\" + System.identityHashCode(this.lookupEnvironment)\n"
+              "\t\t\t\t+ \" package=\" + System.identityHashCode(packageBinding)\n"
+              "\t\t\t\t+ \" packageEnv=\" + (packageBinding == null ? 0 : System.identityHashCode(packageBinding.environment)));\n"
+              "\t\t} catch (Throwable ignored) {\n"
+              "\t\t}\n"
+              "\t}\n"
+          )
+
+          text = text[:open_brace + 1] + entry + text[open_brace + 1:]
+          path.write_text(text)
+          PY
+
+          git diff --no-index -- HierarchyResolver.original.java "$HIER_SRC" || true
+
+      - name: Compile and install only the two patched classes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CP="$(printf '%s:' jdtls/plugins/*.jar)"
+          mkdir lookup-patch-classes hierarchy-patch-classes
+
+          javac \
+            -cp "$CP" \
+            -sourcepath '' \
+            -d lookup-patch-classes \
+            "$LOOKUP_SRC"
+
+          javac \
+            -cp "$CP" \
+            -sourcepath '' \
+            -d hierarchy-patch-classes \
+            "$HIER_SRC"
+
+          LOOKUP_CLASS="lookup-patch-classes/org/eclipse/jdt/internal/compiler/lookup/LookupEnvironment.class"
+          HIER_CLASS="hierarchy-patch-classes/org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.class"
+          test -f "$LOOKUP_CLASS"
+          test -f "$HIER_CLASS"
+
+          jar uf "$BATCH_JAR" -C lookup-patch-classes org/eclipse/jdt/internal/compiler/lookup/LookupEnvironment.class
+          jar uf "$CORE_JAR" -C hierarchy-patch-classes org/eclipse/jdt/internal/core/hierarchy/HierarchyResolver.class
+
+      - name: Run frozen FAIL and PASS controls without changing behavior
+        shell: bash
+        run: |
+          set -u
+          mkdir -p logs data
+
+          run_case() {
+            name="$1"; workspace="$2"; file="$3"
+            rm -rf "data/$name"
+            mkdir -p "data/$name"
+
+            set +e
+            JDTLS_HOME="$PWD/jdtls" JDTLS_DATA_DIR="$PWD/data/$name" JDTLS_WAIT_MS=30000 \
+              timeout 75s node repro/jdtls-calls.mjs "$workspace" "$file" 5 8 \
+              >"logs/$name.stdout" 2>"logs/$name.stderr"
+            rc=$?
+            set -e
+
+            printf '%s\n' "$rc" >"logs/$name.exit"
+            cat "logs/$name.stdout"
+            cat "logs/$name.stderr" >&2
+            echo "CASE_RESULT name=$name exit=$rc stack_overflow=$(grep -c 'StackOverflowError' "logs/$name.stderr" || true) dispatch=$(grep -c 'SOURCE_TYPE_DISPATCH' "logs/$name.stderr" || true) accept=$(grep -c 'SOURCE_TYPE_ACCEPT' "logs/$name.stderr" || true)"
+          }
+
+          set -e
+          run_case fail repro/fail repro/fail/src/main/java/foo/Foo.java
+          run_case pass-no-module repro/pass-no-module repro/pass-no-module/src/main/java/foo/Foo.java
+          run_case pass-no-self-reference-import repro/pass-no-self-reference-import repro/pass-no-self-reference-import/src/main/java/foo/Foo.java
+          run_case pass-separate-test-pkg repro/pass-separate-test-pkg repro/pass-separate-test-pkg/src/main/java/foo/Foo.java
+
+      - name: Verify behavior and summarize source-type micro-probe
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -q 'StackOverflowError' logs/fail.stderr
+          for name in pass-no-module pass-no-self-reference-import pass-separate-test-pkg; do
+            ! grep -q 'StackOverflowError' "logs/$name.stderr"
+            grep -q '^Outgoing calls:' "logs/$name.stdout"
+          done
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          names = [
+              'fail',
+              'pass-no-module',
+              'pass-no-self-reference-import',
+              'pass-separate-test-pkg',
+          ]
+
+          key_re = re.compile(r'sourceTypes=(\d+).* first=(\d+).* file=([^ ]+)')
+
+          for name in names:
+              lines = Path(f'logs/{name}.stderr').read_text(errors='replace').splitlines()
+              dispatch = [line for line in lines if 'SOURCE_TYPE_DISPATCH' in line]
+              accept = [line for line in lines if 'SOURCE_TYPE_ACCEPT' in line]
+
+              dispatch_keys = set()
+              accept_keys = set()
+              for line in dispatch:
+                  match = key_re.search(line)
+                  if match:
+                      dispatch_keys.add(match.groups())
+              for line in accept:
+                  match = key_re.search(line)
+                  if match:
+                      accept_keys.add(match.groups())
+
+              paired = dispatch_keys & accept_keys
+              print(
+                  f'SOURCE_TYPE_TRACE_SUMMARY case={name} '
+                  f'dispatch={len(dispatch)} accept={len(accept)} '
+                  f'identity_pairs={len(paired)}'
+              )
+              for line in dispatch[:30]:
+                  print(line)
+              for line in accept[:30]:
+                  print(line)
+
+          print('JDTLS_3866_SOURCE_TYPE_MICRO_PROBE=COMPLETE')
+          PY
