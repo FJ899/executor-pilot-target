@@ -2,7 +2,7 @@
 
 ## Cel
 
-To repozytorium jest kontrolowanym celem technicznym dla `litrgratis-pixel/Executor`. Ma odpowiedzieć wyłącznie na pytanie, czy Executor potrafi bezpiecznie domknąć małą zmianę w obcym repozytorium.
+To repozytorium jest kontrolowanym celem technicznym dla `FJ899/Executor`. Ma odpowiedzieć wyłącznie na pytanie, czy Executor potrafi bezpiecznie domknąć małą zmianę w obcym repozytorium.
 
 Nie jest dowodem wartości biznesowej Executora. Nie wolno użyć wyniku z tego repo do zamknięcia ryzyka `FIN-008` dotyczącego realnego użycia.
 
