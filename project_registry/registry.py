@@ -34,13 +34,17 @@ class ProjectRegistry:
             raise RegistryError(f"unknown project_id: {project_id}") from exc
 
     def add_many(self, projects: Iterable[Project]) -> None:
-        """Add projects one by one, leaving earlier writes after a late duplicate."""
+        """Add a batch atomically after validating all project identifiers."""
 
-        for project in projects:
-            if project.project_id in self._projects:
+        batch = list(projects)
+        seen = set(self._projects)
+        for project in batch:
+            if project.project_id in seen:
                 raise DuplicateProjectError(
                     f"duplicate project_id: {project.project_id}"
                 )
+            seen.add(project.project_id)
+        for project in batch:
             self._projects[project.project_id] = project
 
     def transition(
